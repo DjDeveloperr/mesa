@@ -265,7 +265,6 @@ lower(nir_builder *b,nir_intrinsic_instr *i,void *data)
 }
 
 #define USER_VARYINGS BITFIELD64_RANGE(VARYING_SLOT_VAR0, 32)
-#define MESH_PSIZ_PLANE 4
 #define MESH_CLIP_SLOTS (VARYING_BIT_CLIP_DIST0 | VARYING_BIT_CLIP_DIST1)
 #define PRIMITIVE_SLOTS (USER_VARYINGS | VARYING_BIT_PRIMITIVE_ID | \
                          VARYING_BIT_LAYER | VARYING_BIT_VIEWPORT)
@@ -342,10 +341,24 @@ agx_gen1_mesh_gather_varyings(const nir_shader *s,
    if (clip_written != (s->info.clip_distance_array_size != 0))
       M5_REFUSE();
 
+   /* The hardware UVS order (agx_uvs.h, agx_nir_lower_uvs): position, user
+    * words, point size, layer/viewport, clip distances. */
    unsigned next = 4, slots = 0;
-   if (varyings->components[VARYING_SLOT_PSIZ]) {
-      varyings->first[VARYING_SLOT_PSIZ] = MESH_PSIZ_PLANE;
-      next++;
+   if (varyings->primitive_stride_B)
+      varyings->components[AGX_MESH_PRIMITIVE_PAGE_SLOT] = page_carrier_words();
+   for (unsigned slot = VARYING_SLOT_CLIP_DIST0; slot < 64; ++slot) {
+      if (!varyings->components[slot])
+         continue;
+      varyings->first[slot] = next;
+      next += varyings->components[slot];
+      slots++;
+   }
+   /* Points always carry a point size. A points shader writing none gets 1.0
+    * next to each position (hk_mesh_default_point_size); one writing no
+    * position either has no defined vertex to size. */
+   if (s->info.mesh.primitive_type == MESA_PRIM_POINTS) {
+      varyings->components[VARYING_SLOT_PSIZ] = 1;
+      varyings->first[VARYING_SLOT_PSIZ] = next++;
    }
    if (varyings->primitive_comps[VARYING_SLOT_LAYER] ||
        varyings->primitive_comps[VARYING_SLOT_VIEWPORT]) {
@@ -356,15 +369,6 @@ agx_gen1_mesh_gather_varyings(const nir_shader *s,
       varyings->clip_first = next;
       varyings->clip_count = s->info.clip_distance_array_size;
       next += varyings->clip_count;
-   }
-   if (varyings->primitive_stride_B)
-      varyings->components[AGX_MESH_PRIMITIVE_PAGE_SLOT] = page_carrier_words();
-   for (unsigned slot = VARYING_SLOT_CLIP_DIST0; slot < 64; ++slot) {
-      if (!varyings->components[slot])
-         continue;
-      varyings->first[slot] = next;
-      next += varyings->components[slot];
-      slots++;
    }
    varyings->size = next;
    varyings->dynamic = slots > 1 || varyings->lv;
@@ -387,10 +391,10 @@ varyings_valid(const struct agx_m5_mesh_varyings *v)
    uint8_t used[4 + 128] = {0};
    unsigned user = 0;
    if (v->components[VARYING_SLOT_PSIZ]) {
-      if (v->components[VARYING_SLOT_PSIZ] != 1 ||
-          v->first[VARYING_SLOT_PSIZ] != MESH_PSIZ_PLANE)
+      const unsigned psiz = v->first[VARYING_SLOT_PSIZ];
+      if (v->components[VARYING_SLOT_PSIZ] != 1 || psiz < 4 ||
+          psiz >= v->size || used[psiz]++)
          M5_REFUSE();
-      used[MESH_PSIZ_PLANE] = 1;
       user++;
    }
    if (v->lv) {
@@ -456,9 +460,6 @@ agx_nir_lower_gen1_mesh(nir_shader *s, const struct agx_m5_mesh_varyings *varyin
       (s->info.per_primitive_outputs & ~(VARYING_BIT_PRIMITIVE_INDICES | PRIMITIVE_SLOTS)) ||
       (s->info.outputs_written & ~s->info.per_primitive_outputs) & ~(VARYING_BIT_POS|VARYING_BIT_PSIZ|MESH_CLIP_SLOTS|USER_VARYINGS) ||
       !varyings_valid(varyings))
-      M5_REFUSE();
-   if (s->info.mesh.primitive_type == MESA_PRIM_POINTS &&
-       !varyings->components[VARYING_SLOT_PSIZ])
       M5_REFUSE();
    struct mesh_layout layout = mesh_layout(s, varyings);
    if (getenv("ASAHI_MESH_PP_AUDIT") &&
