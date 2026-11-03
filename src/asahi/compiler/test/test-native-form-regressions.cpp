@@ -4842,6 +4842,66 @@ TEST(NativeForms, M5MeshClipDistancesPublishVaryingAndClippingPlanes)
    }
 }
 
+TEST(NativeForms, Gen1MeshClipCullPointSizeFollowHardwareUVSOrder)
+{
+   /* Two clip and one cull distance plus gl_CullPrimitiveEXT. User words
+    * (the CLIP_DIST slot) come first, then point size, then the clip group,
+    * as agx_nir_lower_uvs lays out the hardware vertex. */
+   for (mesa_prim prim : {MESA_PRIM_TRIANGLES, MESA_PRIM_POINTS}) {
+      const unsigned corners = prim == MESA_PRIM_POINTS ? 1 : 3;
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_MESH, &agx_nir_options, "gen1 mesh clip/cull");
+      b.shader->info.io_lowered = true;
+      b.shader->info.workgroup_size[0] = 3;
+      b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
+      b.shader->info.mesh.max_vertices_out = 3;
+      b.shader->info.mesh.max_primitives_out = 1;
+      b.shader->info.mesh.primitive_type = prim;
+      b.shader->info.clip_distance_array_size = 2;
+      b.shader->info.cull_distance_array_size = 1;
+      b.shader->info.outputs_written = VARYING_BIT_POS | VARYING_BIT_CLIP_DIST0 |
+         VARYING_BIT_PRIMITIVE_INDICES | VARYING_BIT_CULL_PRIMITIVE;
+      b.shader->info.per_primitive_outputs =
+         VARYING_BIT_PRIMITIVE_INDICES | VARYING_BIT_CULL_PRIMITIVE;
+      nir_set_vertex_and_primitive_count(&b, nir_imm_int(&b, 3),
+                                       nir_imm_int(&b, 1), nir_imm_int(&b, 0));
+      nir_store_per_vertex_output(&b, nir_imm_vec4(&b, 0, 0, 0, 1),
+         nir_imm_int(&b, 0), nir_imm_int(&b, 0), .write_mask = 15,
+         .src_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1});
+      nir_store_per_vertex_output(&b, nir_imm_vec3(&b, 1, 1, -1),
+         nir_imm_int(&b, 0), nir_imm_int(&b, 0), .write_mask = 7,
+         .src_type = nir_type_float32,
+         .io_semantics = {.location = VARYING_SLOT_CLIP_DIST0, .num_slots = 1});
+      nir_store_per_primitive_output(&b, nir_imm_ivec3(&b, 0, 1, 2),
+         nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+         .write_mask = BITFIELD_MASK(corners), .src_type = nir_type_uint32,
+         .io_semantics = {.location = VARYING_SLOT_PRIMITIVE_INDICES,
+                          .num_slots = 1});
+      nir_store_per_primitive_output(&b, nir_imm_true(&b), nir_imm_int(&b, 0),
+         nir_imm_int(&b, 0), .write_mask = 1, .src_type = nir_type_bool1,
+         .io_semantics = {.location = VARYING_SLOT_CULL_PRIMITIVE,
+                          .num_slots = 1});
+      struct agx_m5_mesh_varyings v;
+      ASSERT_TRUE(agx_gen1_mesh_gather_varyings(b.shader, &v));
+      const unsigned psiz = prim == MESA_PRIM_POINTS;
+      EXPECT_TRUE(v.cull_primitive);
+      EXPECT_EQ(v.components[VARYING_SLOT_CLIP_DIST0], 3u);
+      EXPECT_EQ(v.first[VARYING_SLOT_CLIP_DIST0], 4u);
+      EXPECT_EQ(v.components[VARYING_SLOT_PSIZ], psiz);
+      if (psiz) {
+         EXPECT_EQ(v.first[VARYING_SLOT_PSIZ], 7u);
+      }
+      EXPECT_EQ(v.clip_first, 7u + psiz);
+      EXPECT_EQ(v.clip_count, 2u);
+      EXPECT_EQ(v.size, 9u + psiz);
+      ASSERT_TRUE(agx_nir_lower_gen1_mesh(b.shader, &v));
+      EXPECT_EQ(b.shader->info.cull_distance_array_size, 0u);
+      nir_validate_shader(b.shader, "gen1 mesh clip/cull");
+      ralloc_free(b.shader);
+   }
+}
+
 TEST(NativeForms, M5MeshVaryingRefusalsLeaveShaderUntouched)
 {
    /* A placement that does not cover every written component is refused. */

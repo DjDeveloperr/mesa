@@ -6302,7 +6302,8 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
             .src_type = nir_type_uint32,
             .io_semantics = {.location = VARYING_SLOT_LAYER, .num_slots = 1});
       }
-      if (layout_ok && !m5_mesh && varyings.clip_count) {
+      /* The CLIP_DIST slots also carry cull distances (user words only). */
+      if (layout_ok && !m5_mesh) {
          layout.shader->info.clip_distance_array_size = varyings.clip_count;
          for (unsigned slot = VARYING_SLOT_CLIP_DIST0;
               slot <= VARYING_SLOT_CLIP_DIST1; ++slot) {
