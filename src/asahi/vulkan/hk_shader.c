@@ -4654,11 +4654,14 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    } else if (agx_native_graphics(&dev->dev) &&
               (nir->info.stage == MESA_SHADER_GEOMETRY ||
                nir->info.stage == MESA_SHADER_TESS_CTRL ||
-               nir->info.stage == MESA_SHADER_TESS_EVAL)) {
+               nir->info.stage == MESA_SHADER_TESS_EVAL ||
+               nir->info.stage == MESA_SHADER_MESH)) {
       /* Poly executes geometry variants through CDM, so they use the native
        * indexed texture/sampler heaps just like compute shaders. Metal has no
        * geometry stage, but its indexed explicit-level vertex witness emits
-       * the same register-operand SMP form selected after this rewrite. */
+       * the same register-operand SMP form selected after this rewrite. The
+       * VDM-launched mesh program takes the heaps in uniform halves 0..7 like
+       * the vertex program (hk_g17p_graphics_uniform_ranges()). */
       if (agx_nir_lower_g17p_indexed_samplers(nir))
          shader->info.agx3_indexed_sampler_valid = true;
    } else if ((agx_native_graphics(&dev->dev) ||

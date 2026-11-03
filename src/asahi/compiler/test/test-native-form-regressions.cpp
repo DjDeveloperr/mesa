@@ -6140,3 +6140,65 @@ TEST(NativeForms, SignExtendSignedConsumersStillFold)
       ralloc_free(mem);
    }
 }
+
+/* The VDM-launched G17P mesh program reads textures with the indexed forms of
+ * the other pre-raster stages (mesh_shader.ext.synchronization.*_to_mesh):
+ * an explicit-level sample packs as in a vertex program, and an image read
+ * stages its coordinates as in a kernel. */
+static std::vector<uint8_t>
+g17p_pack_texture_read(mesa_shader_stage stage, bool sample)
+{
+   void *mem = ralloc_context(NULL);
+   agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   key.dev.chip = AGX_CHIP_G17P;
+   agx_builder *b = agx_test_builder(mem);
+   b->shader->key = &key;
+   b->shader->stage = stage;
+   agx_index coords = agx_register(12, AGX_SIZE_32);
+   coords.channels_m1 = 1;
+   agx_index result = agx_register(24, AGX_SIZE_32);
+   result.channels_m1 = 3;
+   if (sample) {
+      agx_texture_sample_to(b, result, coords, agx_immediate(0), agx_zero(),
+                            agx_register(16, AGX_SIZE_64),
+                            agx_register(20, AGX_SIZE_64), agx_null(),
+                            AGX_DIM_2D, AGX_LOD_MODE_LOD_MIN, 1, false,
+                            false, false, AGX_GATHER_NONE, false);
+   } else {
+      agx_instr *read = agx_alloc_instr(b, AGX_OPCODE_IMAGE_LOAD, 1, 6);
+      read->dest[0] = result;
+      read->src[0] = coords;
+      read->src[1] = agx_immediate(0);
+      read->src[2] = agx_immediate(0);
+      read->src[3] = agx_register(18, AGX_SIZE_64);
+      read->src[4] = agx_immediate(0);
+      read->src[5] = agx_null();
+      read->dim = AGX_DIM_2D;
+      read->lod_mode = AGX_LOD_MODE_AUTO_LOD;
+      read->mask = 1;
+      agx_builder_insert(&b->cursor, read);
+   }
+   agx_stop(b);
+   util_dynarray bytes;
+   util_dynarray_init(&bytes, mem);
+   std::vector<uint8_t> out;
+   if (agx3_pack_binary(b->shader, &bytes)) {
+      const uint8_t *data = static_cast<const uint8_t *>(bytes.data);
+      out.assign(data, data + bytes.size);
+   }
+   ralloc_free(mem);
+   return out;
+}
+
+TEST(NativeForms, G17PMeshTextureReadsUsePreRasterForms)
+{
+   for (bool sample : {false, true}) {
+      SCOPED_TRACE(sample);
+      const std::vector<uint8_t> mesh =
+         g17p_pack_texture_read(MESA_SHADER_MESH, sample);
+      ASSERT_FALSE(mesh.empty()) << agx_last_compile_refusal();
+      EXPECT_EQ(mesh, g17p_pack_texture_read(
+         sample ? MESA_SHADER_VERTEX : MESA_SHADER_COMPUTE, sample));
+   }
+}
