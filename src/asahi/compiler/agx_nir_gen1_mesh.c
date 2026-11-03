@@ -867,6 +867,13 @@ lower_payload(nir_builder *b,nir_intrinsic_instr *i,void *data)
    bool store=i->intrinsic==nir_intrinsic_store_task_payload;
    if (!store && i->intrinsic!=nir_intrinsic_load_task_payload) M5_REFUSE();
    b->cursor=nir_before_instr(&i->instr);
+   /* G17P exposes no task stage, and a mesh shader may dynamically read only
+    * a payload a task shader emitted (VUID-RuntimeSpirv-MeshEXT-12380): any
+    * read left in a mesh shader is never executed. */
+   if (b->shader->info.stage==MESA_SHADER_MESH) {
+      nir_def_replace(&i->def,nir_undef(b,i->def.num_components,i->def.bit_size));
+      return true;
+   }
    nir_def *pointer=nir_pack_64_2x32(b,nir_load_mesh_payload_address_agx(b));
    nir_def *offset=i->src[store ? 1 : 0].ssa;
    nir_def *addr=nir_iadd(b,pointer,nir_u2u64(b,
@@ -890,14 +897,13 @@ lower_payload(nir_builder *b,nir_intrinsic_instr *i,void *data)
 bool
 agx_nir_lower_gen1_task_payload_probe(nir_shader *s)
 {
-   if (s->info.task_payload_size>4) M5_REFUSE();
-   bool reads=false;
+   if (s->info.stage!=MESA_SHADER_MESH && s->info.task_payload_size>4)
+      M5_REFUSE();
    nir_foreach_function_impl(impl,s) {
       nir_foreach_block(block,impl) {
          nir_foreach_instr(in,block) {
             if (in->type!=nir_instr_type_intrinsic) continue;
             nir_intrinsic_instr *i=nir_instr_as_intrinsic(in);
-            reads |= i->intrinsic==nir_intrinsic_load_task_payload;
             if (i->intrinsic==nir_intrinsic_task_payload_atomic ||
                 i->intrinsic==nir_intrinsic_task_payload_atomic_swap ||
                 i->intrinsic==nir_intrinsic_launch_mesh_workgroups_with_payload_deref)
@@ -905,8 +911,6 @@ agx_nir_lower_gen1_task_payload_probe(nir_shader *s)
          }
       }
    }
-   if (reads && s->info.stage==MESA_SHADER_MESH)
-      M5_REFUSE();
    nir_shader_intrinsics_pass(s,lower_payload,nir_metadata_control_flow,NULL);
    return true;
 }

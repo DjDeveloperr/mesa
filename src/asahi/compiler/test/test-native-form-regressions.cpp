@@ -6202,3 +6202,25 @@ TEST(NativeForms, G17PMeshTextureReadsUsePreRasterForms)
          sample ? MESA_SHADER_VERTEX : MESA_SHADER_COMPUTE, sample));
    }
 }
+
+/* G17P has no task stage, so a mesh payload read is never executed
+ * (mesh_shader.ext.misc.payload_not_accessed) and needs no payload memory. */
+TEST(NativeForms, G17PMeshPayloadReadIsUndefined)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_MESH,
+      &agx_nir_options, "gen1 mesh payload read");
+   b.shader->info.task_payload_size = 16;
+   nir_def *value = nir_load_task_payload(&b, 1, 32, nir_imm_int(&b, 12));
+   nir_store_global(&b, value, nir_imm_int64(&b, 0x2000000),
+                    .write_mask = 1, .align_mul = 4);
+   ASSERT_TRUE(agx_nir_lower_gen1_task_payload_probe(b.shader));
+   nir_foreach_block(block, b.impl) nir_foreach_instr(in, block) {
+      if (in->type != nir_instr_type_intrinsic)
+         continue;
+      const nir_intrinsic_op op = nir_instr_as_intrinsic(in)->intrinsic;
+      EXPECT_NE(op, nir_intrinsic_load_task_payload);
+      EXPECT_NE(op, nir_intrinsic_load_mesh_payload_address_agx);
+   }
+   nir_validate_shader(b.shader, "gen1 mesh payload read");
+   ralloc_free(b.shader);
+}
