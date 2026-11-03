@@ -15924,16 +15924,18 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * (hk_launch_gs_prerast()), which runs one GS invocation per
              * thread. M5 object (task) and mesh programs read SR34 the same
              * way: a native G17G first-thread election in an object
-             * shader reads SR34 into a half register. */
+             * shader reads SR34 into a half register. A G17P mesh program is
+             * a VDM-launched threadgroup whose subgroups Apple's own mesh
+             * code reduces across (sRedumax in its write_uvb helper). */
             const bool subgroup_stage =
                ctx->stage == MESA_SHADER_COMPUTE ||
                ctx->stage == MESA_SHADER_VERTEX ||
                ctx->stage == MESA_SHADER_TESS_CTRL ||
                ctx->stage == MESA_SHADER_GEOMETRY ||
                ctx->stage == MESA_SHADER_FRAGMENT ||
+               ctx->stage == MESA_SHADER_MESH ||
                (enc == AGX_ISA_ENCODING_AGX3C &&
-                (ctx->stage == MESA_SHADER_MESH ||
-                 ctx->stage == MESA_SHADER_TASK));
+                ctx->stage == MESA_SHADER_TASK);
             const bool active_index =
                I->sr == AGX_SR_ACTIVE_THREAD_INDEX_IN_SUBGROUP &&
                subgroup_stage;
