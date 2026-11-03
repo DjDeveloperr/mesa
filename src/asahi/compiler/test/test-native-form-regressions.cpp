@@ -6146,7 +6146,8 @@ TEST(NativeForms, SignExtendSignedConsumersStillFold)
  * an explicit-level sample packs as in a vertex program, and an image read
  * stages its coordinates as in a kernel. */
 static std::vector<uint8_t>
-g17p_pack_texture_read(mesa_shader_stage stage, bool sample)
+g17p_pack_texture_read(mesa_shader_stage stage, bool sample,
+                       bool register_lod = false)
 {
    void *mem = ralloc_context(NULL);
    agx_shader_key key = {};
@@ -6160,7 +6161,9 @@ g17p_pack_texture_read(mesa_shader_stage stage, bool sample)
    agx_index result = agx_register(24, AGX_SIZE_32);
    result.channels_m1 = 3;
    if (sample) {
-      agx_texture_sample_to(b, result, coords, agx_immediate(0), agx_zero(),
+      agx_index lod = register_lod ? agx_register(14, AGX_SIZE_16)
+                                   : agx_immediate(0);
+      agx_texture_sample_to(b, result, coords, lod, agx_zero(),
                             agx_register(16, AGX_SIZE_64),
                             agx_register(20, AGX_SIZE_64), agx_null(),
                             AGX_DIM_2D, AGX_LOD_MODE_LOD_MIN, 1, false,
@@ -6201,6 +6204,16 @@ TEST(NativeForms, G17PMeshTextureReadsUsePreRasterForms)
       EXPECT_EQ(mesh, g17p_pack_texture_read(
          sample ? MESA_SHADER_VERTEX : MESA_SHADER_COMPUTE, sample));
    }
+}
+
+/* A per-lane explicit level in a register (Astro Bot's mesh shaders) packs
+ * in a mesh program as in a vertex program. */
+TEST(NativeForms, G17PMeshRegisterLodSampleUsesVertexForm)
+{
+   const std::vector<uint8_t> mesh =
+      g17p_pack_texture_read(MESA_SHADER_MESH, true, true);
+   ASSERT_FALSE(mesh.empty()) << agx_last_compile_refusal();
+   EXPECT_EQ(mesh, g17p_pack_texture_read(MESA_SHADER_VERTEX, true, true));
 }
 
 /* G17P has no task stage, so a mesh payload read is never executed
