@@ -5864,10 +5864,16 @@ hk_rast_prim(struct hk_cmd_buffer *cmd)
    }
 }
 
+static struct hk_api_shader *
+hk_bound_fs_obj(struct hk_graphics_state *gfx)
+{
+   return gfx->mesh_fs ? gfx->mesh_fs : gfx->shaders[MESA_SHADER_FRAGMENT];
+}
+
 static struct hk_shader *
 hk_bound_fs(struct hk_cmd_buffer *cmd)
 {
-   return hk_fs_variant(cmd->state.gfx.shaders[MESA_SHADER_FRAGMENT],
+   return hk_fs_variant(hk_bound_fs_obj(&cmd->state.gfx),
                         cmd->vk.dynamic_graphics_state.ms.rasterization_samples);
 }
 
@@ -6546,18 +6552,45 @@ hk_cmd_bind_graphics_shader(struct hk_cmd_buffer *cmd,
       BITSET_SET(dyn->dirty, MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES);
 }
 
+/* A G17P fragment shader compiled without its mesh shader draws with the
+ * twin built for that mesh shader's per-primitive records. */
+static void
+hk_select_mesh_fs(struct hk_cmd_buffer *cmd)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   struct hk_api_shader *fs = gfx->shaders[MESA_SHADER_FRAGMENT];
+   struct hk_api_shader *mesh = gfx->shaders[MESA_SHADER_MESH];
+   struct hk_api_shader *twin = NULL;
+
+   /* A twin compiles custom-border emulation in, so it has no border twin. */
+   if (fs->mesh_source && mesh) {
+      twin = hk_mesh_fs_twin(dev, fs, hk_main_mesh_variant(mesh));
+      if (!twin)
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+
+   if (gfx->mesh_fs != twin) {
+      gfx->mesh_fs = twin;
+      gfx->shaders_dirty |= BITFIELD_BIT(MESA_SHADER_FRAGMENT);
+   }
+}
+
 static void
 hk_flush_shaders(struct hk_cmd_buffer *cmd)
 {
-   struct hk_api_shader *fs_obj =
-       cmd->state.gfx.shaders[MESA_SHADER_FRAGMENT];
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   if (gfx->shaders_dirty & (BITFIELD_BIT(MESA_SHADER_FRAGMENT) |
+                             BITFIELD_BIT(MESA_SHADER_MESH)))
+      hk_select_mesh_fs(cmd);
+
+   struct hk_api_shader *fs_obj = hk_bound_fs_obj(gfx);
    const bool sample_variant_dirty = fs_obj->g17p_sample_variants &&
       BITSET_TEST(cmd->vk.dynamic_graphics_state.dirty,
                   MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES);
-   if (cmd->state.gfx.shaders_dirty == 0 && !sample_variant_dirty)
+   if (gfx->shaders_dirty == 0 && !sample_variant_dirty)
       return;
 
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
    if (sample_variant_dirty)
       gfx->shaders_dirty |= BITFIELD_BIT(MESA_SHADER_FRAGMENT);
 

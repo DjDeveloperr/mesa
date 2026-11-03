@@ -279,6 +279,20 @@ lower(nir_builder *b,nir_intrinsic_instr *i,void *data)
 #define PRIMITIVE_SLOTS (USER_VARYINGS | VARYING_BIT_PRIMITIVE_ID | \
                          VARYING_BIT_LAYER | VARYING_BIT_VIEWPORT)
 
+void
+agx_gen1_mesh_record_layout(struct agx_m5_mesh_varyings *varyings)
+{
+   unsigned record = 0;
+   for (unsigned slot = 0; slot < 64; ++slot) {
+      if (!varyings->primitive_comps[slot])
+         continue;
+      varyings->primitive_first[slot] = record;
+      record += varyings->primitive_comps[slot];
+   }
+   varyings->primitive_components = varyings->primitive_comps[VARYING_SLOT_VAR0];
+   varyings->primitive_stride_B = 4 * record;
+}
+
 bool
 agx_gen1_mesh_gather_varyings(const nir_shader *s,
                             struct agx_m5_mesh_varyings *varyings)
@@ -338,15 +352,7 @@ agx_gen1_mesh_gather_varyings(const nir_shader *s,
    
 
 
-   unsigned record = 0;
-   for (unsigned slot = 0; slot < 64; ++slot) {
-      if (!varyings->primitive_comps[slot])
-         continue;
-      varyings->primitive_first[slot] = record;
-      record += varyings->primitive_comps[slot];
-   }
-   varyings->primitive_components = varyings->primitive_comps[VARYING_SLOT_VAR0];
-   varyings->primitive_stride_B = 4 * record;
+   agx_gen1_mesh_record_layout(varyings);
    if ((uint64_t)varyings->primitive_stride_B * s->info.mesh.max_primitives_out >
        UINT64_C(0x10000))
       M5_REFUSE();
@@ -974,13 +980,13 @@ lower_primitive_input(nir_builder *b, nir_intrinsic_instr *i, void *data)
    b->cursor = nir_before_instr(&i->instr);
    const struct agx_m5_mesh_varyings *mesh = data;
    const unsigned location = nir_intrinsic_io_semantics(i).location;
-   if (mesh && (location >= 64 || !mesh->primitive_comps[location])) {
+   if (location >= 64 || !mesh->primitive_comps[location]) {
       nir_def_rewrite_uses(&i->def, nir_imm_zero(b, i->def.num_components,
                                                  i->def.bit_size));
       nir_instr_remove(&i->instr);
       return true;
    }
-   const unsigned record_first = mesh ? mesh->primitive_first[location] : 0;
+   const unsigned record_first = mesh->primitive_first[location];
    nir_def *primitive_cf = nir_load_coefficients_agx(b, nir_imm_int(b, 0),
       .component = 0, .interp_mode = INTERP_MODE_FLAT,
       .io_semantics = {.location = VARYING_SLOT_PRIMITIVE_ID, .num_slots = 1});
@@ -1056,7 +1062,7 @@ lower_primitive_input(nir_builder *b, nir_intrinsic_instr *i, void *data)
 }
 
 static bool
-fragment_inputs_supported(nir_shader *s, const struct agx_m5_mesh_varyings *mesh)
+fragment_inputs_supported(nir_shader *s)
 {
    nir_foreach_function_impl(impl, s) {
       nir_foreach_block(block, impl) {
@@ -1073,8 +1079,6 @@ fragment_inputs_supported(nir_shader *s, const struct agx_m5_mesh_varyings *mesh
                M5_REFUSE();
             if (location >= 64 || !(PRIMITIVE_SLOTS & BITFIELD64_BIT(location)))
                M5_REFUSE();
-            if (!mesh && location != VARYING_SLOT_VAR0)
-               M5_REFUSE();
          }
       }
    }
@@ -1086,39 +1090,11 @@ agx_nir_lower_gen1_mesh_fragment_layout(nir_shader *s,
                                       const struct agx_m5_mesh_varyings *mesh)
 {
    if (s->info.stage != MESA_SHADER_FRAGMENT || !mesh ||
-       !fragment_inputs_supported(s, mesh))
+       !fragment_inputs_supported(s))
       M5_REFUSE();
    nir_shader_intrinsics_pass(s, lower_primitive_input,
       primitive_audit_va() ? nir_metadata_none : nir_metadata_control_flow,
       (void *)mesh);
-   if (primitive_audit_va())
-      nir_shader_gather_info(s, nir_shader_get_entrypoint(s));
-   return true;
-}
-
-bool
-agx_nir_lower_gen1_mesh_fragment(nir_shader *s)
-{
-   if (s->info.stage != MESA_SHADER_FRAGMENT)
-      M5_REFUSE();
-   nir_foreach_function_impl(impl, s) {
-      nir_foreach_block(block, impl) {
-         nir_foreach_instr(in, block) {
-            if (in->type != nir_instr_type_intrinsic)
-               continue;
-            nir_intrinsic_instr *i = nir_instr_as_intrinsic(in);
-            if (i->intrinsic != nir_intrinsic_load_per_primitive_input)
-               continue;
-            if (nir_intrinsic_io_semantics(i).location != VARYING_SLOT_VAR0 ||
-                !nir_src_is_const(i->src[0]) || nir_src_as_uint(i->src[0]) != 0 ||
-                nir_intrinsic_component(i) + i->def.num_components > 4 ||
-                (i->def.bit_size != 32 && i->def.bit_size != 16))
-               M5_REFUSE();
-         }
-      }
-   }
-   nir_shader_intrinsics_pass(s, lower_primitive_input,
-      primitive_audit_va() ? nir_metadata_none : nir_metadata_control_flow, NULL);
    if (primitive_audit_va())
       nir_shader_gather_info(s, nir_shader_get_entrypoint(s));
    return true;
