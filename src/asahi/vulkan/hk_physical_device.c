@@ -245,6 +245,7 @@ hk_get_device_extensions(const struct agx_device *dev,
       .EXT_extended_dynamic_state2 = true,
       .EXT_extended_dynamic_state3 = true,
       .EXT_external_memory_dma_buf = true,
+      .EXT_fragment_shader_interlock = agx_native_graphics(dev),
       .EXT_global_priority = true,
       .EXT_global_priority_query = true,
       .EXT_graphics_pipeline_library = true,
@@ -669,6 +670,16 @@ hk_get_device_features(
       .conditionalRendering = supported_extensions->EXT_conditional_rendering,
       .inheritedConditionalRendering =
          supported_extensions->EXT_conditional_rendering,
+
+      /* VK_EXT_fragment_shader_interlock */
+      .fragmentShaderSampleInterlock =
+         supported_extensions->EXT_fragment_shader_interlock,
+      /* Pixel ordering covers only the samples a fragment covers, so two
+       * pixel-rate fragments splitting one MSAA pixel overlap
+       * (fragment_shader_interlock.basic.*.pixel_*.4xaa.no_sample_shading).
+       */
+      .fragmentShaderPixelInterlock = false,
+      .fragmentShaderShadingRateInterlock = false,
 
       /* VK_EXT_custom_border_color */
       .customBorderColors = true,

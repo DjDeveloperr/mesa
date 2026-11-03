@@ -634,6 +634,9 @@ typedef struct {
    /* Does the shader statically use scratch memory? */
    bool any_scratch;
 
+   /* Interlock waits guard memory, not the tilebuffer, so keep them. */
+   bool any_interlock;
+
    /* Mask of pixel fences we've definitely already waited for. */
    uint16_t already_pixel_waited;
 

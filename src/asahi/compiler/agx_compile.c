@@ -4133,9 +4133,15 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
    }
 
    case nir_intrinsic_begin_invocation_interlock: {
+      b->shader->any_interlock = true;
       agx_wait_pixel_mask(b, 0xC);
       return NULL;
    }
+
+   case nir_intrinsic_end_invocation_interlock:
+      /* The end of the fragment releases class 12, which only lengthens the
+       * critical section. */
+      return NULL;
 
    case nir_intrinsic_ddx:
    case nir_intrinsic_ddx_coarse:
@@ -12088,7 +12094,7 @@ agx3_merge_unread_pixel_waits(agx_context *ctx)
 {
    if (!agx_isa_is_agx3(ctx->key->dev.encoding) ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
-       ctx->key->fs.ignore_tib_dependencies)
+       ctx->key->fs.ignore_tib_dependencies || ctx->any_interlock)
       return false;
 
    bool stores = false;
