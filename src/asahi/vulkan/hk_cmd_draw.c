@@ -103,9 +103,6 @@ DEBUG_GET_ONCE_BOOL_OPTION(m5_launch_debug, "ASAHI_M5_LAUNCH_DEBUG", false)
 DEBUG_GET_ONCE_BOOL_OPTION(m5_msaa_pass_merge, "ASAHI_M5_MSAA_PASS_MERGE", true)
 DEBUG_GET_ONCE_BOOL_OPTION(m5_verify_tile_loader, "AGX_M5_VERIFY_TILE_LOADER",
                            false)
-DEBUG_GET_ONCE_BOOL_OPTION(mesh_native_primitive_address,
-                           "ASAHI_MESH_NATIVE_PRIMITIVE_ADDRESS_DIAGNOSTIC",
-                           false)
 DEBUG_GET_ONCE_BOOL_OPTION(mesh_native_m5_wclamp,
                            "ASAHI_MESH_NATIVE_M5_WCLAMP_DIAGNOSTIC", false)
 DEBUG_GET_ONCE_BOOL_OPTION(mesh_native_raster_enable,
@@ -8695,8 +8692,7 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
       dev->dev.chip == AGX_CHIP_G17P &&
       vs->info.stage == MESA_SHADER_MESH &&
       vs->info.uvs.mesh_primitive_page &&
-      vs->info.mesh.primitive_stride_B != 0 &&
-      debug_get_option_mesh_native_primitive_address();
+      vs->info.mesh.primitive_stride_B != 0;
    const struct agx_ppp_w_clamp_cull2_fields w_cull2_fields = {
       .w_clamp_raw = dev->dev.chip == AGX_CHIP_G17P &&
                      vs->info.stage == MESA_SHADER_MESH &&

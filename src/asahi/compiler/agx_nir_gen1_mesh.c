@@ -59,13 +59,6 @@ primitive_audit_fragment_first(void)
 }
 
 static bool
-native_primitive_address(void)
-{
-   const char *enable = getenv("ASAHI_MESH_NATIVE_PRIMITIVE_ADDRESS_DIAGNOSTIC");
-   return enable && !strcmp(enable, "1");
-}
-
-static bool
 native_page_carrier(void)
 {
    const char *enable = getenv("ASAHI_MESH_NATIVE_PAGE_CARRIER");
@@ -869,10 +862,13 @@ lower_primitive_input(nir_builder *b, nir_intrinsic_instr *i, void *data)
    nir_def *base = native_page_carrier()
       ? nir_ishl_imm(b, nir_u2u64(b, base_low), 16)
       : nir_pack_64_2x32(b, nir_vec2(b, base_low, base_high));
-   nir_def *address = native_primitive_address()
-      ? nir_ior(b, nir_iand_imm(b, base, ~UINT64_C(0xffff)),
-                nir_u2u64(b, nir_iand_imm(b, nir_ishl_imm(b, low, 2), 0xffff)))
-      : nir_iadd(b, base, nir_u2u64(b, nir_iand_imm(b, low, 0xffff)));
+   /* With PPP cull2 0x2000 the primitive coefficient holds the record's word
+    * offset in its 64 KiB storage page, as Apple's G16S/G17P fragment code
+    * reads it (shift by 2, add the page). Read as a byte offset, a 64-workgroup
+    * per-primitive draw hung the M4 Pro (G17P). */
+   nir_def *address =
+      nir_ior(b, nir_iand_imm(b, base, ~UINT64_C(0xffff)),
+              nir_u2u64(b, nir_iand_imm(b, nir_ishl_imm(b, low, 2), 0xffff)));
    address = nir_iadd_imm(b, address,
                           4 * (record_first + nir_intrinsic_component(i)));
    nir_def *value = nir_load_global(b, i->def.num_components, 32, address,
