@@ -472,7 +472,7 @@ agx_nir_lower_gen1_mesh(nir_shader *s, const struct agx_m5_mesh_varyings *varyin
    unsigned threads=s->info.workgroup_size[0]*s->info.workgroup_size[1]*
                     s->info.workgroup_size[2];
    if(s->info.stage!=MESA_SHADER_MESH || s->info.shared_size>32768 ||
-      s->info.workgroup_size_variable || threads==0 || threads>128 ||
+      s->info.workgroup_size_variable || threads==0 || threads>256 ||
       s->info.mesh.max_vertices_out==0 || s->info.mesh.max_vertices_out>256 ||
       s->info.mesh.max_primitives_out==0 || s->info.mesh.max_primitives_out>256 ||
       prim_vertices(s)==0 ||

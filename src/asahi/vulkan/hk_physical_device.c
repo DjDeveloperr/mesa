@@ -1038,6 +1038,9 @@ hk_get_device_properties(const struct agx_device *dev,
    const bool texel_buffer_single_texel_alignment =
       hk_descriptor_generation_is_agx2(descriptor_generation) ||
       agx_chip_native_agx3(dev->chip);
+   /* G17P: what agx_nir_lower_gen1_mesh accepts and the CTS runs there
+    * (misc.maximize_invocations_256); no larger mesh workgroup was run. */
+   const uint32_t mesh_threads = dev->chip == AGX_CHIP_G17P ? 256 : 1024;
 
    /* Note: update nir_shader_compiler_options.max_samples when changing this. */
    const VkSampleCountFlagBits sample_counts =
@@ -1227,8 +1230,8 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxTaskPayloadAndSharedMemorySize = 32768,
       .maxMeshWorkGroupTotalCount = 1u << 22,
       .maxMeshWorkGroupCount = {65535, 65535, 65535},
-      .maxMeshWorkGroupInvocations = 1024,
-      .maxMeshWorkGroupSize = {1024, 1024, 1024},
+      .maxMeshWorkGroupInvocations = mesh_threads,
+      .maxMeshWorkGroupSize = {mesh_threads, mesh_threads, mesh_threads},
       .maxMeshSharedMemorySize = 28672,
       .maxMeshPayloadAndSharedMemorySize = 28672 + 16384,
       .maxMeshOutputMemorySize = 32768,
