@@ -5132,6 +5132,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    struct agx_shader_key backend_key = {
       .reserved_preamble = root + (4 * (1 + set_count)),
       .g17p_texture_uniform_base = m5_native_query_abi ? (dev->m5_rq_instances ? 168 : 156) : texture_uniform_base,
+      .g17p_storage_image_pair = shader->info.agx3_storage_image_valid &&
+                                 !shader->info.agx3_storage_image.write_only,
       .dev = agx_gather_device_key(&dev->dev),
       .no_stop = nir->info.stage == MESA_SHADER_FRAGMENT,
       .has_scratch = !nir->info.internal,

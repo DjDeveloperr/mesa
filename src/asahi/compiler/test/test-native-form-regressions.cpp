@@ -1197,6 +1197,64 @@ TEST(NativeForms, ImageStoreUsesDataTypeAcrossChipsAndFormats)
    EXPECT_NE(reference[0], reference[1]);
 }
 
+/* A G17P state-0 storage image that the shader also reads names its
+ * texture/PBE descriptor pair through state 0 (hk's read/write ABI): record 0
+ * is the texture, which read as a PBE describes a far larger surface, so the
+ * store must take record 1. A write-only image's state 0 is the PBE itself and
+ * keeps record 0. Only the immediate descriptor index may differ. */
+TEST(NativeForms, G17PState0PairedStoreTakesTheSecondRecord)
+{
+   agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+
+   std::vector<uint8_t> store[2];
+   for (bool pair : {false, true}) {
+      SCOPED_TRACE(pair ? "read/write pair" : "write-only");
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "state-0 store record");
+      nir_def *input = agx_test_load_preamble(&b, 4, 32, 4);
+      nir_intrinsic_instr *intr = nir_image_store(
+         &b, nir_imm_intN_t(&b, 0, 16), nir_imm_ivec4(&b, 0, 0, 0, 0),
+         nir_imm_intN_t(&b, 0, 16), input, nir_imm_intN_t(&b, 0, 16));
+      nir_intrinsic_set_image_dim(intr, GLSL_SAMPLER_DIM_2D);
+      nir_intrinsic_set_format(intr, PIPE_FORMAT_R32_UINT);
+      nir_intrinsic_set_src_type(intr, nir_type_uint32);
+      agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+      key.dev.chip = AGX_CHIP_G17P;
+      key.no_preamble = true;
+      key.reserved_preamble = 16;
+      key.g17p_storage_image_pair = pair;
+      agx_preprocess_nir(b.shader);
+      agx_shader_part part = {};
+      ASSERT_TRUE(agx_compile_shader_nir(b.shader, &key, &part));
+      const uint8_t *code = static_cast<const uint8_t *>(part.binary);
+      const unsigned size = part.info.binary_size;
+      ASSERT_GE(size, AGX3_IMAGE_WRITE_LENGTH + end.length);
+      const uint8_t *write = code + size - end.length - AGX3_IMAGE_WRITE_LENGTH;
+      store[pair].assign(write, write + AGX3_IMAGE_WRITE_LENGTH);
+      free(part.binary);
+      ralloc_free(b.shader);
+   }
+
+   /* The encoder's own difference between records 0 and 1 at one base. */
+   agx3_image_write_desc d = {};
+   d.image_kind = AGX3_TEX_OPERAND_IMMEDIATE;
+   d.dim = AGX3_IMAGE_WRITE_2D;
+   uint8_t record[2][AGX3_IMAGE_WRITE_LENGTH], length[2];
+   for (unsigned i = 0; i < 2; ++i) {
+      d.image_value = i;
+      ASSERT_TRUE(agx3_tex_encode_image_write_2d(AGX_ISA_ENCODING_AGX3B, &d, 0,
+                                                 1, record[i], &length[i]));
+   }
+   ASSERT_EQ(length[0], AGX3_IMAGE_WRITE_LENGTH);
+   for (unsigned i = 0; i < AGX3_IMAGE_WRITE_LENGTH; ++i) {
+      SCOPED_TRACE(i);
+      EXPECT_EQ(store[0][i] ^ store[1][i], record[0][i] ^ record[1][i]);
+   }
+   EXPECT_NE(store[0], store[1]);
+}
+
 TEST(NativeForms, VertexImageLoadRegisterLod)
 {
    nir_builder b = nir_builder_init_simple_shader(

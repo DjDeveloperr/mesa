@@ -513,6 +513,11 @@ struct agx_shader_key {
    /* Uniform half containing the indexed texture heap; sampler follows at+4. */
    uint16_t g17p_texture_uniform_base;
 
+   /* G17P state-0 storage image read and written by the shader: the state-0
+    * pointer names its texture/PBE descriptor pair, so the store's PBE is
+    * record 1 of it (a write-only image's pointer names the PBE itself). */
+   bool g17p_storage_image_pair;
+
    /* Whether scratch memory is available in the given shader stage */
    bool has_scratch;
 
