@@ -1040,7 +1040,7 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
    agx_prepare_for_map(ctx, rsrc, level, usage, box, staging_blit);
 
    struct agx_device *dev = agx_device(pctx->screen);
-   const bool trace_read = (dev->chip == AGX_CHIP_G18G || dev->chip == AGX_CHIP_G17G) &&
+   const bool trace_read = (dev->chip == AGX_CHIP_G18G || agx_chip_g17_m5(dev->chip)) &&
                           (dev->debug & AGX_DBG_FAULTTRACE) &&
                           (usage & PIPE_MAP_READ);
    if (trace_read) {
@@ -1255,7 +1255,7 @@ agx_clear(struct pipe_context *pctx, unsigned buffers,
    struct agx_context *ctx = agx_context(pctx);
 
    /* G17G clears a layer at a time, as it draws (agx_g17g_bind_layer). */
-   if (agx_device(pctx->screen)->chip == AGX_CHIP_G17G &&
+   if (agx_chip_g17_m5(agx_device(pctx->screen)->chip) &&
        !ctx->g17g_layer_split &&
        util_framebuffer_get_num_layers(&ctx->framebuffer) > 1) {
       if (agx_render_condition_check(ctx))
@@ -1265,7 +1265,7 @@ agx_clear(struct pipe_context *pctx, unsigned buffers,
    }
 
    /* G17G clears a colour attachment at a time, as it draws. */
-   if (agx_device(pctx->screen)->chip == AGX_CHIP_G17G &&
+   if (agx_chip_g17_m5(agx_device(pctx->screen)->chip) &&
        ctx->framebuffer.nr_cbufs > 1) {
       if (agx_render_condition_check(ctx))
          agx_g17g_split_mrt_clear(ctx, buffers, color_clear_mask,
@@ -1608,7 +1608,7 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
     * Gallium path had been publishing G17P's 15-bit pair on G17G, which the
     * kernel's M5 depth admission refused as soon as a render actually carried
     * a depth attachment. */
-   if (dev->chip == AGX_CHIP_G18G || dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G) {
+   if (dev->chip == AGX_CHIP_G18G || dev->chip == AGX_CHIP_G17P || agx_chip_g17_m5(dev->chip)) {
       c->isp_zls_pixels =
          agx_zls_pixels(dev->chip, c->width_px, c->height_px, c->depth.base,
                         c->depth.comp_base, c->stencil.base,
@@ -2165,7 +2165,7 @@ agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    pctx->clear = agx_clear;
    pctx->resource_copy_region = agx_resource_copy_region;
    pctx->blit = agx_blit;
-   if (agx_device(screen)->chip == AGX_CHIP_G17G)
+   if (agx_chip_g17_m5(agx_device(screen)->chip))
       pctx->generate_mipmap = agx_generate_mipmap_g17g;
    pctx->flush_resource = agx_flush_resource;
 
@@ -2420,7 +2420,7 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    u_init_pipe_screen_caps(pscreen, 1);
 
    /* G17G generates mipmaps on the CPU (agx_generate_mipmap_g17g). */
-   caps->generate_mipmap = agx_device(pscreen)->chip == AGX_CHIP_G17G;
+   caps->generate_mipmap = agx_chip_g17_m5(agx_device(pscreen)->chip);
 
    caps->clip_halfz = true;
    caps->prefer_real_buffer_in_constbuf0 = true;
@@ -2454,14 +2454,15 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->occlusion_query = true;
    /* Timer queries are not optional for GL 3.3 (ARB_timer_query), which
     * gates every later desktop GL version, so on M6 (G18G), whose kernel
-    * contract is still being written, and on the M5 Max (G17C), follow
+    * contract is still being written, and on the M5 Pro and M5 Max (G17S,
+    * G17C), whose G17 runtime maps timestamp objects, follow
     * whether the kernel binds a timestamp object rather than assuming or
     * refusing it.
     */
    struct agx_device *dev = agx_device(pscreen);
    const bool timestamps =
       agx_params_g18g_bringup_supported(&dev->params) ||
-            dev->chip == AGX_CHIP_G17C
+            dev->chip == AGX_CHIP_G17S || dev->chip == AGX_CHIP_G17C
          ? agx_kernel_binds_timestamps(dev)
          : !agx_params_m5_supported(&dev->params);
    caps->query_timestamp = timestamps;
@@ -2993,7 +2994,7 @@ agx_screen_create(int fd, struct renderonly *ro,
    g17g_nir_options.support_indirect_inputs &=
       ~BITFIELD_BIT(MESA_SHADER_FRAGMENT);
    for (unsigned i = 0; i <= MESA_SHADER_COMPUTE; i++)
-      screen->nir_options[i] = agx_screen->dev.chip == AGX_CHIP_G17G
+      screen->nir_options[i] = agx_chip_g17_m5(agx_screen->dev.chip)
                                   ? &g17g_nir_options
                                   : &agx_nir_options;
 

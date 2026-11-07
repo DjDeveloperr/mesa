@@ -784,7 +784,7 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
     * resource_copy_region uses. This covers glCopyImageSubData between
     * different formats of one size, which the state tracker turns into a
     * reinterpreting blit; the draw path refuses most of those formats. */
-   if (agx_device(pipe->screen)->chip == AGX_CHIP_G17G &&
+   if (agx_chip_g17_m5(agx_device(pipe->screen)->chip) &&
        (info->src.format != info->src.resource->format ||
         info->dst.format != info->dst.resource->format) &&
        util_can_blit_via_copy_region(info, true, false)) {
@@ -965,7 +965,7 @@ agx_resource_copy_region(struct pipe_context *pctx, struct pipe_resource *dst,
                          unsigned dstz, struct pipe_resource *src,
                          unsigned src_level, const struct pipe_box *src_box)
 {
-   if (agx_device(pctx->screen)->chip == AGX_CHIP_G17G) {
+   if (agx_chip_g17_m5(agx_device(pctx->screen)->chip)) {
       /* Copy through transfer maps, which synchronize with the GPU: G17G
        * has no precompiled copy kernels (agx_launch_precomp refuses the
        * batch), and a copy blit's render target is mostly outside the
