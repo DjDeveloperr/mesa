@@ -155,6 +155,15 @@ if with_tests
     ),
     suite : ['asahi'],
   )
+  test(
+    'hk_g17p_storage_image',
+    executable(
+      'hk_g17p_storage_image_test',
+      files('tests/test-hk-g17p-storage-image.c'),
+      include_directories : include_directories('.'),
+    ),
+    suite : ['asahi'],
+  )
 
   test(
     'hk_gen1_query_state',
