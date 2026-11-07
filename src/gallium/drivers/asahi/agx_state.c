@@ -7135,6 +7135,37 @@ agx_build_native_g17g_graphics_program(struct agx_batch *batch,
          }
       }
    }
+   if (agx_m5_render_resources(dev)) {
+      /* The kernel sizes the render's pools from this (hk_cmd_draw.c,
+       * hk_m5_note_render_resources): primary storage is the larger of the
+       * spill frame and the SPECTPR frame; a vertex program's secondary
+       * storage is twice its staging extent; a fragment program carries the
+       * render's imageblock. */
+      const bool fragment = cs->stage == MESA_SHADER_FRAGMENT;
+      const struct agx_tilebuffer_layout *tib = &batch->tilebuffer_layout;
+      const uint32_t samples = MAX2(tib->nr_samples, 1);
+      const uint32_t sample_bytes = tib->tile_size * tib->sample_size_B;
+      const uint32_t staging_B = linked->g17p_compiler_d_valid
+                                    ? linked->g17p_compiler_d
+                                    : linked->nr_gprs;
+      const struct drm_asahi_render_program_v2 entry = {
+         .legacy = {
+            .stage = fragment,
+            .primary_bytes =
+               MAX2(linked->scratch_size, linked->agx3_spectpr_scratch_size),
+            .secondary_bytes = fragment ? 0 : staging_B * 2,
+            .imageblock_bytes = fragment ? sample_bytes * samples : 0,
+            .multisample_bytes = !fragment     ? 0
+                                 : samples == 2 ? sample_bytes / 4
+                                 : samples == 4 ? sample_bytes
+                                 : samples == 8 ? 4 * sample_bytes
+                                                : 0,
+         },
+      };
+      agx_batch_note_m5_render_program(batch, &entry);
+      batch->m5_shader_writes |= cs->so && cs->so->info.writes_memory;
+   }
+
    if (full_va)
       *full_va = t.gpu;
    return agx_usc_addr(dev, t.gpu);
@@ -7620,6 +7651,19 @@ agx_g17p_append_compute(struct agx_batch *batch,
                                      batch->cdm.current - cdm_base_map,
                                      grid, wg, shader_va, UINT32_MAX))
             return false;
+
+         /* The dispatch's storage, as hk_m5_compute_resources() lists it.
+          * This path refuses spills, so only the workgroup's shared memory
+          * and size vary. */
+         if (agx_m5_render_resources(dev)) {
+            const struct drm_asahi_compute_program profile = {
+               .primary_bytes = info->scratch_size,
+               .threadgroup_bytes =
+                  shared ? MAX2(256u, ALIGN_POT((uint32_t)shared, 64u)) : 0,
+               .threads = wg.x * wg.y * wg.z,
+            };
+            agx_batch_note_m5_compute_program(batch, &profile);
+         }
       }
 
       if (constant_bo)
@@ -9558,6 +9602,8 @@ agx_build_native_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key
    return (struct asahi_bg_eot){
       .usc = agx_usc_addr(dev, ptr.gpu),
       .rsrc_spec = store || no_color ? 0 : UINT64_C(0xffff800000000040),
+      .primary_storage_B = desc.scratch_size,
+      .staging_storage_B = desc.compiler_d,
    };
 }
 

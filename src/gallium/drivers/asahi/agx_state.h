@@ -603,6 +603,20 @@ struct agx_batch {
     * still needs its render. */
    unsigned draws_refused;
 
+   /* M5 on the G17 kernel runtime (agx_m5_render_resources): the storage
+    * the programs of this batch need, sent ahead of its render and compute
+    * commands. m5_render_programs holds one drm_asahi_render_program_v2 per
+    * distinct linked vertex or fragment program demand, m5_tile_program the
+    * background and end-of-tile programs' record, m5_compute_programs one
+    * drm_asahi_compute_program per distinct dispatch demand. The kernel takes
+    * the maximum over each list, so they are sets. */
+   struct util_dynarray m5_render_programs;
+   struct util_dynarray m5_compute_programs;
+   struct drm_asahi_render_program m5_tile_program;
+
+   /* A graphics program of this render writes memory (its kernel write
+    * class, DRM_ASAHI_RENDER_SHADER_WRITES). */
+   bool m5_shader_writes;
 
    uint64_t uploaded_clear_color[PIPE_MAX_COLOR_BUFS];
    union pipe_color_union clear_color[PIPE_MAX_COLOR_BUFS];
@@ -1612,6 +1626,11 @@ void agx_batch_init_state(struct agx_batch *batch);
 struct asahi_bg_eot {
    uint64_t usc;
    uint64_t rsrc_spec;
+
+   /* M5: the program's primary (thread-private) and staging storage, for
+    * the render's tile record (agx_m5_render_resources). */
+   uint32_t primary_storage_B;
+   uint32_t staging_storage_B;
 };
 
 /* Per-field maxima. Page-count descriptor words are exact under this merge;
@@ -1645,6 +1664,14 @@ agx_g18_note_tile(struct agx_batch *batch, bool store, unsigned registers_16,
    r->tile_registers_16[slot] = MAX2(r->tile_registers_16[slot], registers_16);
    r->tile_staging_16[slot] = MAX2(r->tile_staging_16[slot], staging_16);
 }
+
+void agx_batch_note_m5_render_program(
+   struct agx_batch *batch, const struct drm_asahi_render_program_v2 *program);
+void agx_batch_note_m5_compute_program(
+   struct agx_batch *batch, const struct drm_asahi_compute_program *program);
+void agx_batch_set_m5_tile_program(struct agx_batch *batch,
+                                   const struct asahi_bg_eot *const *programs,
+                                   unsigned count);
 
 struct asahi_bg_eot agx_build_bg_eot(struct agx_batch *batch, bool store,
                                      bool partial_render);

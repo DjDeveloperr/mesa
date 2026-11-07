@@ -1597,8 +1597,11 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
 
    /* G17P treats an absent ZLS allocation as an inactive depth surface.  Its
     * native render command keeps the clear register at 1.0 in that state;
-    * zero is only a real clear value when depth or stencil storage exists. */
-   if ((agx_native_graphics(dev) || dev->chip == AGX_CHIP_G18G) && !zres &&
+    * zero is only a real clear value when depth or stencil storage exists.
+    * Honeykrisp submits M5 renders on the G17 runtime the same way
+    * (hk_drm_g17p_depth_clear). */
+   if ((agx_native_graphics(dev) || dev->chip == AGX_CHIP_G18G ||
+        agx_m5_render_resources(dev)) && !zres &&
        !sres)
       c->isp_bgobjdepth = fui(1.0f);
 
@@ -1885,6 +1888,16 @@ agx_flush_render(struct agx_context *ctx, struct agx_batch *batch,
       agx_build_bg_eot(batch, false, true);
 
    struct asahi_bg_eot pipeline_store = agx_build_bg_eot(batch, true, false);
+
+   /* The render submits the eot program for both its final and its partial
+    * store (agx_cmdbuf), so these three are every tile program it runs. */
+   if (agx_m5_render_resources(dev)) {
+      const struct asahi_bg_eot *const tile_programs[] = {
+         &pipeline_background, &pipeline_background_partial, &pipeline_store,
+      };
+      agx_batch_set_m5_tile_program(batch, tile_programs,
+                                    ARRAY_SIZE(tile_programs));
+   }
 
    bool clear_pipeline_textures =
       agx_tilebuffer_spills(&batch->tilebuffer_layout);
