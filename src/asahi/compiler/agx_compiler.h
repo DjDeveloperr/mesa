@@ -1429,6 +1429,7 @@ void agx_liveness_ins_update(struct u_sparse_bitset *live, agx_instr *I);
 
 bool agx_nir_opt_preamble(nir_shader *s, unsigned *sizes, bool g17p,
                           bool agx3c);
+bool agx_nir_export_select_flags_as_halves(nir_shader *s, bool branches);
 bool agx_nir_remove_unused_preamble_exports(nir_shader *s, unsigned reserved);
 bool agx_nir_coalesce_preamble_half_exports(nir_shader *s, unsigned reserved,
                                           unsigned allocated);

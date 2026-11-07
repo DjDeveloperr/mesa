@@ -660,6 +660,7 @@ if with_tests
          'test/test-device-load-batches.cpp',
          'test/test-fuse-lea-constants.cpp',
          'test/test-m5-copy-schedule.cpp',
+         'test/test-preamble-flag-branches.cpp',
       ),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
