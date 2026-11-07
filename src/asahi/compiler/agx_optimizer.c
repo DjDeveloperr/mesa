@@ -464,6 +464,16 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
           I->op == AGX_OPCODE_FCMPSEL && I->dest[0].size == AGX_SIZE_16)
          continue;
 
+      /* AGX3's FMA takes a minifloat for one multiplicand (beside an optional
+       * minifloat addend) and has no form that multiplies two immediates, so
+       * the packer refused the whole shader (Cyberpunk 2077's benchmark
+       * vertex shaders: ffma r32, #k16, #k16, r32). Keep the second constant
+       * multiplicand in its register. */
+      if (ctx->key && ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2 &&
+          I->op == AGX_OPCODE_FFMA && s < 2 &&
+          I->src[1 - s].type == AGX_INDEX_IMMEDIATE)
+         continue;
+
       agx_instr *def = defs[src.value];
       if (!def || def->op != AGX_OPCODE_MOV_IMM)
          continue;
