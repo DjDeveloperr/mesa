@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <xf86drm.h>
+#include <linux/dma-buf.h>
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/compiler/agx_debug.h"
 #include "asahi/layout/layout.h"
@@ -815,6 +816,52 @@ agx_shadow(struct agx_context *ctx, struct agx_resource *rsrc, bool needs_copy)
  * Perform the required synchronization before a transfer_map operation can
  * complete. This may require syncing batches.
  */
+/*
+ * A writer on another context is not in this context's writer table. That is
+ * the window-system case: the EGL context renders a GBM surface buffer and
+ * flushes it at eglSwapBuffers, and gbm_bo_map() maps it through the GBM
+ * device's own context, which then read the buffer before the GPU had
+ * written it (gbm-scanout-test read black on the M5 Pro unless the client
+ * called glFinish first). Wait for the syncobj the writing submission left
+ * on the BO (agx_batch_submit records it for every BO a batch writes), and
+ * for the implicit fences of an exported BO, which also cover writers in
+ * other processes.
+ */
+static void
+agx_sync_foreign_writer(struct agx_context *ctx, struct agx_resource *rsrc)
+{
+   struct agx_device *dev = agx_device(ctx->base.screen);
+   struct agx_bo *bos[2] = {rsrc->bo,
+                            rsrc->separate_stencil ? rsrc->separate_stencil->bo
+                                                   : NULL};
+
+   for (unsigned i = 0; i < ARRAY_SIZE(bos); ++i) {
+      struct agx_bo *bo = bos[i];
+      if (!bo)
+         continue;
+
+      const uint64_t writer = p_atomic_read(&bo->writer);
+      if (writer && agx_bo_writer_queue(writer) != ctx->queue_id) {
+         uint32_t syncobj = agx_bo_writer_syncobj(writer);
+         int ret;
+         do {
+            ret = drmSyncobjWait(dev->fd, &syncobj, 1, INT64_MAX,
+                                 DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL, NULL);
+         } while (ret == -EINTR);
+      }
+
+      if ((bo->flags & AGX_BO_SHARED) && bo->prime_fd >= 0) {
+         struct dma_buf_sync sync = {
+            .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ,
+         };
+         if (!drmIoctl(bo->prime_fd, DMA_BUF_IOCTL_SYNC, &sync)) {
+            sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
+            drmIoctl(bo->prime_fd, DMA_BUF_IOCTL_SYNC, &sync);
+         }
+      }
+   }
+}
+
 static void
 agx_prepare_for_map(struct agx_context *ctx, struct agx_resource *rsrc,
                     unsigned level,
@@ -826,6 +873,11 @@ agx_prepare_for_map(struct agx_context *ctx, struct agx_resource *rsrc,
     */
    if (staging_blit)
       return;
+
+   /* Before the validity test: a write on another context need not have
+    * marked the level valid here. */
+   if (!(usage & PIPE_MAP_UNSYNCHRONIZED))
+      agx_sync_foreign_writer(ctx, rsrc);
 
    /* If the level has not been written, we may freely do CPU access (writes),
     * even if other levels are being written by the GPU. This lets us write some
