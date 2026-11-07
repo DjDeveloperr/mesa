@@ -4799,6 +4799,14 @@ agx_update_fs(struct agx_batch *batch)
                               : 0,
    };
    agx_fs_epilog_apply_device_policy(dev->chip, &link_key.epilog.fs);
+   /* G17S (and G17C, the same core) share G17P's tile behaviour: a covered
+    * fragment with no tile store still dirties the tile, which then stores
+    * undefined colour at EOT. Measured on the M5 Pro: a draw with every
+    * colour channel masked off left (0,0,0,0) where the clear had been. Keep
+    * the destination with a load/store pair, as G17P does. G17G is left as
+    * its validated line has it. */
+   if (agx_chip_g17_m5(dev->chip) && dev->chip != AGX_CHIP_G17G)
+      link_key.epilog.fs.preserve_zero_mask = true;
 
    if (agx_g18_native_ms_spills(batch)) {
       link_key.epilog.fs.native_spills = true;
