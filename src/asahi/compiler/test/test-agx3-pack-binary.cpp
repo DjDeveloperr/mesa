@@ -14942,6 +14942,42 @@ TEST_F(AGX3PackBinary, StorageImageBankAndSlotMatchNative)
    EXPECT_EQ(memcmp(bytes, second, sizeof(second)), 0);
 }
 
+/* Array layers stay constant across mip levels, unlike 3D depth, so G17C keeps
+ * array and 3D stores distinct. G17G drops the layer operand and still writes
+ * layered images as 3D. */
+TEST_F(AGX3PackBinary, LayeredStorageImageWritesFollowTheChip)
+{
+   const struct {
+      enum agx_isa_encoding enc;
+      enum agx_chip chip;
+      bool distinct;
+   } cases[] = {
+      {AGX_ISA_ENCODING_AGX3B, AGX_CHIP_G17P, true},
+      {AGX_ISA_ENCODING_AGX3C, AGX_CHIP_G17C, true},
+      {AGX_ISA_ENCODING_AGX3C, AGX_CHIP_G17G, false},
+   };
+   for (const auto &c : cases) {
+      key.dev.chip = c.chip;
+      std::vector<uint8_t> code[2];
+      for (unsigned i = 0; i < 2; ++i) {
+         agx_builder *b = builder(c.enc);
+         b->shader->stage = MESA_SHADER_COMPUTE;
+         agx_index data = agx_register(8, AGX_SIZE_32);
+         data.channels_m1 = 3;
+         agx_index coords = agx_register(0, AGX_SIZE_32);
+         coords.channels_m1 = 2;
+         agx_image_write(b, data, coords, agx_immediate(0),
+                         agx_uniform(20, AGX_SIZE_64),
+                         agx_register(6, AGX_SIZE_32),
+                         i ? AGX_DIM_3D : AGX_DIM_2D_ARRAY, false);
+         agx_stop(b);
+         code[i] = pack(b);
+         ASSERT_FALSE(code[i].empty());
+      }
+      EXPECT_EQ(code[0] != code[1], c.distinct) << "chip " << c.chip;
+   }
+}
+
 TEST_F(AGX3PackBinary, InFlightStorageImageWritesUseDisjointBanks)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;
