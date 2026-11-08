@@ -118,9 +118,12 @@ end_timestamp(struct hk_cmd_buffer *cmd, uint32_t query)
    hk_sync_write_timestamp(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, req);
 }
 
-/* ResetQueryPool leaves a reusable compute stream. TOP_OF_PIPE must become
- * its start stamp before a following dispatch reuses it; otherwise resolving
- * the pending start at BOTTOM_OF_PIPE puts both stamps after the work.
+/* G17P: ResetQueryPool leaves a reusable compute stream. A TOP_OF_PIPE stamp
+ * after it ends that stream's command: G17P start stamps latch before the
+ * command's waits (hk_sync.c, start_stamps_ordered()), so the stamp must not
+ * become the start of the dispatch that reuses the stream, and ending the
+ * reset's command keeps it after the reset. The dispatch gets a command of
+ * its own and the bottom stamp ends it.
  */
 static void
 test_timestamp_reused_compute(void)
@@ -138,31 +141,47 @@ test_timestamp_reused_compute(void)
       const struct agx_timestamp_req start = {
          .handle = 1, .addr = 0x10000, .offset_B = 0};
       hk_sync_write_timestamp(cmd, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, start);
-      T("top timestamp requests a check of the reused compute stream",
-        cmd->sync.cs_check_pending);
+      T("top timestamp is no pending start", !cmd->sync.pending_start_ts.handle);
+      T("top timestamp ends the reset's command",
+        reset->timestamp.end.handle == start.handle &&
+        reset->timestamp.end.offset_B == start.offset_B &&
+        !reset->timestamp.start.handle);
+      T("top timestamp closes the reset stream", !cmd->current_cs.cs);
 
-      struct hk_cs *dispatch = hk_cmd_buffer_get_cs(cmd, true);
-      T("timed dispatch reuses the reset stream", dispatch == reset);
-      T("top timestamp is consumed before the reused dispatch",
-        !cmd->sync.pending_start_ts.handle &&
-        dispatch->timestamp.start.handle == start.handle &&
-        dispatch->timestamp.start.offset_B == start.offset_B &&
-        dispatch->timestamp.start.addr == start.addr);
-      /* A broken placement would need another payload-producing stream,
-       * outside this CPU fixture, when recording the end stamp. */
-      if (cmd->sync.pending_start_ts.handle)
-         continue;
-
+      /* The next dispatch opens a stream of its own (the CPU fixture cannot
+       * allocate one through hk_cmd_buffer_get_cs()). */
+      struct hk_cs *dispatch = add(cmd, true);
+      cmd->current_cs.cs = dispatch;
+      T("dispatch takes no start stamp", !dispatch->timestamp.start.handle);
       dispatch->stats.cmds++;
       end_timestamp(cmd, 1);
       T("bottom timestamp ends the dispatch's command",
         dispatch->timestamp.end.handle == 1 &&
         dispatch->timestamp.end.offset_B == 8);
-      T("timestamp pair needs no extra compute command",
-        list_is_singular(&cmd->control_streams));
       T("bottom timestamp closes the timed stream", !cmd->current_cs.cs);
       T("timed reset and dispatch resolve", submit(new_queue(exact), cmd));
    }
+}
+
+/* G17P: a TOP_OF_PIPE stamp inside a render pass instance ends the render
+ * (fragment end), never its vertex start: G17P start stamps latch before the
+ * render's waits, so a query reset before the pass could overwrite one. */
+static void
+test_timestamp_top_in_pass(void)
+{
+   struct hk_cmd_buffer *cmd = timestamp_cmd(AGX_CHIP_G17P, true);
+   hk_sync_begin_rendering(cmd, false);
+   struct hk_cs *render = test_alloc(sizeof(*render));
+   render->type = HK_CS_VDM;
+   list_addtail(&render->node, &cmd->control_streams);
+   hk_sync_stream_created(cmd, render, &cmd->current_cs.gfx, false);
+   cmd->current_cs.gfx = render;
+   render->stats.cmds++;
+   const struct agx_timestamp_req top = {.handle = 1, .addr = 0x10000, .offset_B = 0};
+   hk_sync_write_timestamp(cmd, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, top);
+   T("in-pass top stamp ends the render",
+     render->timestamp.end.handle == 1 && render->timestamp.end.offset_B == 0);
+   T("in-pass top stamp takes no vertex start", !render->timestamp.start.handle);
 }
 
 /* Exercise actual timestamp placement, barriers and the submission resolver.
@@ -1329,6 +1348,7 @@ main(void)
    test_rt_kernel_gate();
    test_timestamp_execution_scopes();
    test_timestamp_reused_compute();
+   test_timestamp_top_in_pass();
    {
       /* A submission longer than the 16-bit barrier field: a wait on a
        * command past it is named by its ordinal (that command went in an

@@ -1245,6 +1245,22 @@ stamp_wait(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    }
 }
 
+/* G17P latches a command's start stamps when the firmware takes the command,
+ * before its barriers resolve: a vkCmdResetQueryPool dispatch followed by a
+ * full ALL_COMMANDS barrier still overwrites the next render's vertex start
+ * stamp most of the time, and dependent start stamps read earlier than the
+ * previous end. Only end stamps are ordered after a command's waits, so
+ * every stamp rides on a command's end: a top-of-pipe stamp (Vulkan 1.3,
+ * 17.5: no first scope) on the end of the last recorded work, which may
+ * latch it at any logically later point.
+ */
+static bool
+start_stamps_ordered(const struct hk_cmd_buffer *cmd)
+{
+   const struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   return !(agx_native_graphics(&dev->dev) && dev->dev.chip == AGX_CHIP_G17P);
+}
+
 static struct hk_cs *
 last_stream(struct hk_cmd_buffer *cmd)
 {
@@ -1305,9 +1321,11 @@ hk_sync_write_timestamp(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 stage,
 
    if (st->in_pass && gfx) {
       /* Inside a render pass instance the stamp belongs to the render.
-       * Vertex start for an unordered stamp, fragment end otherwise; a
-       * second end stamp is copied from the first after the render. */
-      if (!src_kinds && !gfx->timestamp.start.handle) {
+       * Vertex start for an unordered stamp where start stamps are ordered
+       * (start_stamps_ordered()), fragment end otherwise; a second end
+       * stamp is copied from the first after the render. */
+      if (!src_kinds && !gfx->timestamp.start.handle &&
+          start_stamps_ordered(cmd)) {
          gfx->timestamp.start = req;
          return;
       }
@@ -1336,7 +1354,7 @@ hk_sync_write_timestamp(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 stage,
       return;
    }
 
-   if (!src_kinds) {
+   if (!src_kinds && start_stamps_ordered(cmd)) {
       hk_sync_flush_pending_timestamp(cmd);
       st->pending_start_ts = req;
       /* A query reset or earlier dispatch may have left a reusable stream.
