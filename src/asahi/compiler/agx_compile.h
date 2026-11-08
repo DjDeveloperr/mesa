@@ -239,6 +239,10 @@ struct agx_shader_info {
     */
    bool needs_quad_derivatives;
 
+   /* Fragment shader needs whole 2x2 quads: a quad operation
+    * (require_full_quads) or QuadDerivativesKHR. */
+   bool needs_full_quads;
+
    /* Reads draw ID system value */
    bool uses_draw_id;
 
