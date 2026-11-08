@@ -8882,12 +8882,13 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
          (!agx_chip_tri_merge_across_side_effects(dev->dev.chip) &&
           (linked_fragment_control & (UINT32_C(1) << 26))),
 
-      /* Native forces bit26 for type2 and conditionally for type3 from the
-       * draw-buffer state. Keep the already-qualified conservative type3
-       * policy until that draw-buffer field is decoded. */
+      /* Native forces bit26 for type 2, and for type 3 only in a multisampled
+       * pass: Metal on the M4 Pro clears it for single-sample type 3 in every
+       * state tried, and a 1x/4x pair differs in this bit alone. */
       .coverage_tri_merge_disable =
          pass_type == AGX_PASS_TYPE_PUNCH_THROUGH ||
-         pass_type == AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH,
+         (pass_type == AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH &&
+          render->tilebuffer.nr_samples > 1),
 
       /* encodeISPPrimitiveType selects the runtime override for points,
        * lines, and non-filled triangles, then applies it to both controls. */
