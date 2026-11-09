@@ -589,11 +589,17 @@ agx_chip_exact_product_name(enum agx_chip chip)
 bool
 agx_params_m5_supported(const struct drm_asahi_params_global *params)
 {
-   return params && agx_chip_from_params(params) == AGX_CHIP_G17G &&
-          params->chip_id == 0x8142 && params->num_dies == 1 &&
-          params->num_clusters_total == 1 &&
-          params->usc_generation == AGX_ISA_AGX3 &&
-          params->gpu_hal_generation == DRM_ASAHI_GPU_HAL_300;
+   if (!params || params->num_dies != 1 ||
+       params->usc_generation != AGX_ISA_AGX3 ||
+       params->gpu_hal_generation != DRM_ASAHI_GPU_HAL_300)
+      return false;
+
+   const enum agx_chip chip = agx_chip_from_params(params);
+   return (chip == AGX_CHIP_G17G && params->chip_id == 0x8142 &&
+           params->num_clusters_total == 1) ||
+          /* T6050 M5 Max (J716c): G17C, one die, four clusters. */
+          (chip == AGX_CHIP_G17C && params->chip_id == 0x6050 &&
+           params->num_clusters_total == 4);
 }
 
 bool
