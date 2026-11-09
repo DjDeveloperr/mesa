@@ -10310,6 +10310,10 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
       NIR_PASS(_, nir, agx_nir_scalarize_int64);
    NIR_PASS(_, nir, nir_lower_int64);
 
+   /* Constant-program flags, now that their trivial branches are selects. */
+   if (byte_indices && !m5)
+      NIR_PASS(_, nir, agx_nir_export_select_flags_as_halves, true);
+
    /* After the selects of trivial if-else statements exist. */
    if (m5) {
       bool folded = false;
