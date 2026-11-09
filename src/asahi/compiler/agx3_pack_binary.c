@@ -1323,49 +1323,61 @@ out:
    return valid;
 }
 
-/* Explicit sample and G17P centroid coordinates are an opaque 32-bit token.
- * Require the most recent overlapping write in this block to be ITRCOORDS of
- * the same interpolation, so a legacy ITER sample-index register or an
- * unrelated arithmetic value cannot accidentally select the native f32interp
- * coordinate leaf. A tied final interpolation is valid because sources are
- * read before its destination overwrites the token. */
-static bool
-agx3_sample_coords_use(const agx_block *block, const agx_instr *consumer)
-{
-   if (consumer->nr_srcs != 2 || !agx3_vary_reg32(consumer->src[1]))
-      return false;
-
-   const unsigned base = consumer->src[1].value;
-   const agx_instr *producer = NULL;
-   agx_foreach_instr_in_block(block, I) {
-      if (I == consumer)
-         return producer != NULL;
-
-      agx_foreach_dest(I, d) {
-         const agx_index dst = I->dest[d];
-         if (!agx3_src_is_register(dst) || dst.memory)
-            continue;
-         const unsigned end = dst.value + agx_index_size_16(dst);
-         if (end <= base || dst.value >= base + 2)
-            continue;
-
-         producer = I->op == AGX_OPCODE_ITRCOORDS_AGX3 && dst.value == base &&
-                          dst.size == AGX_SIZE_32 && agx_channels(dst) == 1 &&
-                          I->interpolation == consumer->interpolation
-                       ? I
-                       : NULL;
-      }
-   }
-
-   return false;
-}
-
 static bool
 agx3_interp_uses_coords(enum agx_isa_encoding enc, const agx_instr *I)
 {
    return I->interpolation == AGX_INTERPOLATION_SAMPLE ||
           (I->interpolation == AGX_INTERPOLATION_CENTROID &&
            (enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C));
+}
+
+/* Explicit sample and G17P centroid coordinates are an opaque 32-bit token.
+ * Require each consumer's token to be the SSA result of ITRCOORDS of the same
+ * interpolation, so a legacy ITER sample-index register or an unrelated
+ * arithmetic value cannot select the native f32interp coordinate leaf.
+ *
+ * This is a property of the SSA value, not of a physical register: register
+ * allocation may copy, swap or spill and fill the token on its way to a
+ * consumer, which preserves its 32 bits but not the register that ITRCOORDS
+ * wrote. Check it before RA; the packer then only checks the encoding.
+ */
+bool
+agx3_interp_coords_from_itrcoords(const agx_context *ctx)
+{
+   const enum agx_isa_encoding enc = ctx->key->dev.encoding;
+   const agx_instr **defs = calloc(ctx->alloc, sizeof(*defs));
+   if (!defs)
+      return false;
+
+   agx_foreach_instr_global(ctx, I) {
+      agx_foreach_ssa_dest(I, d)
+         defs[I->dest[d].value] = I;
+   }
+
+   bool valid = true;
+   agx_foreach_instr_global(ctx, I) {
+      if ((I->op != AGX_OPCODE_INTERP_AGX3 &&
+           I->op != AGX_OPCODE_RHW_INTERP_AGX3) ||
+          !agx3_interp_uses_coords(enc, I))
+         continue;
+
+      const agx_index coords = I->src[1];
+      const agx_instr *producer =
+         I->nr_srcs == 2 && coords.type == AGX_INDEX_NORMAL &&
+               !coords.memory && coords.value < ctx->alloc
+            ? defs[coords.value]
+            : NULL;
+      if (!producer || producer->op != AGX_OPCODE_ITRCOORDS_AGX3 ||
+          producer->interpolation != I->interpolation ||
+          coords.size != AGX_SIZE_32 || agx_channels(coords) != 1 ||
+          coords.abs || coords.neg) {
+         valid = false;
+         break;
+      }
+   }
+
+   free(defs);
+   return valid;
 }
 
 static bool
@@ -14283,9 +14295,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          if (I->op == AGX_OPCODE_INTERP_AGX3 ||
              I->op == AGX_OPCODE_RHW_INTERP_AGX3) {
-            if (agx3_interp_uses_coords(enc, I) &&
-                !agx3_sample_coords_use(block, I))
-               AGX3_REFUSE(I);
             if (I->op == AGX_OPCODE_RHW_INTERP_AGX3 &&
                 ((enc != AGX_ISA_ENCODING_AGX3B && enc != AGX_ISA_ENCODING_AGX3C) ||
                  ctx->stage != MESA_SHADER_FRAGMENT ||
