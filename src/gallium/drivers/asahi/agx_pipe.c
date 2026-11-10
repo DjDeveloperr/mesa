@@ -2442,12 +2442,14 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->occlusion_query = true;
    /* Timer queries are not optional for GL 3.3 (ARB_timer_query), which
     * gates every later desktop GL version, so on M6 (G18G), whose kernel
-    * contract is still being written, follow whether the kernel binds a
-    * timestamp object rather than assuming or refusing it.
+    * contract is still being written, and on the M5 Max (G17C), follow
+    * whether the kernel binds a timestamp object rather than assuming or
+    * refusing it.
     */
    struct agx_device *dev = agx_device(pscreen);
    const bool timestamps =
-      agx_params_g18g_bringup_supported(&dev->params)
+      agx_params_g18g_bringup_supported(&dev->params) ||
+            dev->chip == AGX_CHIP_G17C
          ? agx_kernel_binds_timestamps(dev)
          : !agx_params_m5_supported(&dev->params);
    caps->query_timestamp = timestamps;
