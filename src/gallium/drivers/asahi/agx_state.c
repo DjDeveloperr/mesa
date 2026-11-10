@@ -14849,6 +14849,13 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    }
 
    if (info->mode == MESA_PRIM_PATCHES) {
+      /* The M5 GPUs tessellate only on the CPU (agx_swtnl_applies()): a patch
+       * draw that path cannot take (indirect, or images before rasterization)
+       * has no encoding here. */
+      if (agx_chip_g17_m5(agx_device(ctx->base.screen)->chip)) {
+         agx_native_descriptor_reject_batch(batch, "tessellation outside the CPU path");
+         return;
+      }
       agx_draw_patches(ctx, info, drawid_offset, indirect, draws, num_draws);
       return;
    }
