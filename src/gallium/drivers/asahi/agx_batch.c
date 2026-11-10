@@ -43,7 +43,7 @@ agx_append_split_compute(struct util_dynarray *cmdbuf,
                     sizeof(struct drm_asahi_cmd_compute_with_prior));
       extended.base.legacy.flags |= DRM_ASAHI_COMPUTE_G18_RESOURCES;
       header.size = sizeof(extended);
-      if (getenv("ASAHI_G18_RESOURCE_TRACE")) {
+      if (agx_env_flag(AGX_ENV_G18_RESOURCE_TRACE)) {
          const uint8_t *bytes = (const void *)&extended;
          fprintf(stderr, "G18_COMPUTE_RESOURCE_PAYLOAD ");
          for (unsigned i = 0; i < sizeof(extended); ++i)
@@ -1686,7 +1686,7 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
           * stream; a geometry or transform-feedback prepass emits several.
           * Report the stream extent so a hang can be told apart from a
           * refusal without a kernel rebuild. */
-         if (getenv("NEO_AGX_DRAW_DIAGNOSTICS")) {
+         if (agx_env_flag(AGX_ENV_NEO_DRAW_DIAGNOSTICS)) {
             fprintf(stderr,
                     "NEO_PREPASS queue=%u batch=%u stream=%" PRIx64 "..%" PRIx64
                     " stream_bytes=%" PRIu64 "\n",
@@ -1917,7 +1917,7 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
       .cmdbuf_size = cmdbuf.size,
    };
 
-   if (getenv("NEO_AGX_DRAW_DIAGNOSTICS"))
+   if (agx_env_flag(AGX_ENV_NEO_DRAW_DIAGNOSTICS))
       fprintf(stderr, "NEO_SUBMIT queue=%u batch=%u seq=%llu draws=%u render=%u compute=%u bytes=%zu\n",
               ctx->queue_id, agx_batch_idx(batch), (unsigned long long)seqid,
               batch->draws, !!render, !!compute, (size_t)cmdbuf.size);
@@ -1934,7 +1934,7 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
       ctx->submit_perf.failures++;
    const int submit_errno =
       ret < -1 ? -ret : (ret ? (errno ? errno : EIO) : 0);
-   if (getenv("NEO_AGX_DRAW_DIAGNOSTICS"))
+   if (agx_env_flag(AGX_ENV_NEO_DRAW_DIAGNOSTICS))
       fprintf(stderr, "NEO_SUBMIT_RESULT queue=%u batch=%u seq=%llu ret=%d errno=%d\n",
               ctx->queue_id, agx_batch_idx(batch), (unsigned long long)seqid,
               ret, submit_errno);

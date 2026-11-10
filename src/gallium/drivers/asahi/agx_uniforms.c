@@ -55,7 +55,7 @@ agx_upload_vbos(struct agx_batch *batch)
          attribs->key[i].stride, attribs->src_offsets[i], &addr);
 
       batch->uniforms.attrib_base[i] = addr;
-      if (getenv("NEO_AGX_UNIFORM_DIAGNOSTICS") &&
+      if (agx_env_flag(AGX_ENV_NEO_UNIFORM_DIAGNOSTICS) &&
           attribs->key[i].format != PIPE_FORMAT_NONE)
          fprintf(stderr, "NEO_VBO attrib=%u buffer=%u gpu=%#llx source_gpu=%#llx size=%zu offset=%u stride=%u divisor=%u clamp=%u\n",
                  i, buf, (unsigned long long)addr,
@@ -206,7 +206,7 @@ agx_set_cbuf_uniforms(struct agx_batch *batch, mesa_shader_stage stage)
    u_foreach_bit(cb, st->cb_mask) {
       unif->ubo_base[cb] = agx_const_buffer_ptr(batch, &st->cb[cb]);
       unif->ubo_size[cb] = st->cb[cb].buffer_size;
-      if (getenv("NEO_AGX_UNIFORM_DIAGNOSTICS"))
+      if (agx_env_flag(AGX_ENV_NEO_UNIFORM_DIAGNOSTICS))
          fprintf(stderr, "NEO_UBO stage=%u cb=%u gpu=%#llx offset=%u size=%u backed=%u\n",
                  stage, cb, (unsigned long long)unif->ubo_base[cb],
                  st->cb[cb].buffer_offset, st->cb[cb].buffer_size,

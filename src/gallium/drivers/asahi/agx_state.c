@@ -1094,7 +1094,7 @@ agx_pack_texture(enum agx_descriptor_generation descriptor_generation,
       agx_gallium_pack_native_texture(descriptor_generation, out, &cfg);
 
    if (packed && agx_device(rsrc->base.screen)->chip == AGX_CHIP_G18G &&
-       getenv("ASAHI_G18_RESOURCE_TRACE")) {
+       agx_env_flag(AGX_ENV_G18_RESOURCE_TRACE)) {
       fprintf(stderr,
               "G18_TEXTURE_TRACE format=%s resource_format=%s target=%u "
               "view_target=%u samples=%u storage_samples=%u bind=%#x "
@@ -3249,7 +3249,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          gs_copy->info.perspective_varyings =
             ~(key_->gs.flat_varyings | key_->gs.linear_varyings);
       }
-      if (getenv("NEO_AGX_DRAW_DIAGNOSTICS")) {
+      if (agx_env_flag(AGX_ENV_NEO_DRAW_DIAGNOSTICS)) {
          fprintf(stderr,
                  "NEO_GS_COPY link_uvs=%u known=%u flat=%llx linear=%llx\n",
                  (unsigned)key_->gs.link_uvs,
@@ -6644,7 +6644,7 @@ agx_build_agx3_graphics_program(struct agx_batch *batch,
    for (unsigned i = 0; i < cs->push_range_count; ++i) {
       const struct agx_push_range *push = &cs->push[i];
       const uint64_t table = batch->uniforms.tables[push->table];
-      if (getenv("NEO_AGX_UNIFORM_DIAGNOSTICS"))
+      if (agx_env_flag(AGX_ENV_NEO_UNIFORM_DIAGNOSTICS))
          fprintf(stderr, "NEO_PUSH_INPUT stage=%u index=%u table=%u offset=%u start=%u halfs=%u table_gpu=%#llx\n",
                  stage, i, push->table, push->offset, push->uniform,
                  push->length, (unsigned long long)table);
@@ -6716,7 +6716,7 @@ agx_build_agx3_graphics_program(struct agx_batch *batch,
          .size_halfs = length,
          .address = source,
       };
-      if (getenv("NEO_AGX_UNIFORM_DIAGNOSTICS"))
+      if (agx_env_flag(AGX_ENV_NEO_UNIFORM_DIAGNOSTICS))
          fprintf(stderr, "NEO_PUSH stage=%u table=%u offset=%u start=%u halfs=%u table_gpu=%#llx source_gpu=%#llx\n",
                  stage, push->table, push->offset, start, length,
                  (unsigned long long)table, (unsigned long long)source);
@@ -6725,7 +6725,7 @@ agx_build_agx3_graphics_program(struct agx_batch *batch,
    if (cs->b.info.rodata.size_16) {
       const struct agx_rodata *rodata = &cs->b.info.rodata;
       const uint64_t size_B = (uint64_t)rodata->size_16 * 2;
-      if (getenv("NEO_AGX_UNIFORM_DIAGNOSTICS"))
+      if (agx_env_flag(AGX_ENV_NEO_UNIFORM_DIAGNOSTICS))
          fprintf(stderr, "NEO_RODATA stage=%u base=%u halfs=%u offset=%u bo=%p size=%zu\n",
                  stage, rodata->base_uniform, rodata->size_16, rodata->offset,
                  (void *)cs->bo, cs->bo ? (size_t)cs->bo->size : 0);
@@ -6857,7 +6857,7 @@ agx_build_agx3_graphics_program(struct agx_batch *batch,
                                t.gpu - program_bo->va->addr,
                                program_length))
       AGX3_PROGRAM_REFUSE("program upload");
-   if (getenv("NEO_AGX_BINARY_DIAGNOSTICS")) {
+   if (agx_env_flag(AGX_ENV_NEO_BINARY_DIAGNOSTICS)) {
       fprintf(stderr, "NEO_NATIVE stage=%u program=%#llx shader=%#llx size=%zu gprs=%u compiler_d=%u ranges=%zu\n",
               stage, (unsigned long long)t.gpu,
               (unsigned long long)desc.shader_va, linked->size,
@@ -6959,7 +6959,7 @@ agx_build_native_g17g_graphics_program(struct agx_batch *batch,
    for (unsigned i = 0; i < cs->push_range_count; ++i) {
       const struct agx_push_range *push = &cs->push[i];
       const uint64_t table = batch->uniforms.tables[push->table];
-      if (getenv("NEO_AGX_UNIFORM_DIAGNOSTICS"))
+      if (agx_env_flag(AGX_ENV_NEO_UNIFORM_DIAGNOSTICS))
          fprintf(stderr, "NEO_PUSH_INPUT stage=%u index=%u table=%u offset=%u start=%u halfs=%u table_gpu=%#llx\n",
                  stage, i, push->table, push->offset, push->uniform,
                  push->length, (unsigned long long)table);
@@ -7022,7 +7022,7 @@ agx_build_native_g17g_graphics_program(struct agx_batch *batch,
          .size_halfs = length,
          .address = source,
       };
-      if (getenv("NEO_AGX_UNIFORM_DIAGNOSTICS"))
+      if (agx_env_flag(AGX_ENV_NEO_UNIFORM_DIAGNOSTICS))
          fprintf(stderr, "NEO_PUSH stage=%u table=%u offset=%u start=%u halfs=%u table_gpu=%#llx source_gpu=%#llx\n",
                  stage, push->table, push->offset, start, length,
                  (unsigned long long)table, (unsigned long long)source);
@@ -7031,7 +7031,7 @@ agx_build_native_g17g_graphics_program(struct agx_batch *batch,
    if (cs->b.info.rodata.size_16) {
       const struct agx_rodata *rodata = &cs->b.info.rodata;
       const uint64_t size_B = (uint64_t)rodata->size_16 * 2;
-      if (getenv("NEO_AGX_UNIFORM_DIAGNOSTICS"))
+      if (agx_env_flag(AGX_ENV_NEO_UNIFORM_DIAGNOSTICS))
          fprintf(stderr, "NEO_RODATA stage=%u base=%u halfs=%u offset=%u bo=%p size=%zu\n",
                  stage, rodata->base_uniform, rodata->size_16, rodata->offset,
                  (void *)cs->bo, cs->bo ? (size_t)cs->bo->size : 0);
@@ -7112,7 +7112,7 @@ agx_build_native_g17g_graphics_program(struct agx_batch *batch,
                                t.gpu - program_bo->va->addr,
                                program.length))
       AGX3_PROGRAM_REFUSE("program upload");
-   if (getenv("NEO_AGX_BINARY_DIAGNOSTICS")) {
+   if (agx_env_flag(AGX_ENV_NEO_BINARY_DIAGNOSTICS)) {
       fprintf(stderr, "NEO_NATIVE stage=%u program=%#llx shader=%#llx size=%zu gprs=%u compiler_d=%u ranges=%zu\n",
               stage, (unsigned long long)t.gpu,
               (unsigned long long)desc.shader_va, linked->size,
@@ -7358,7 +7358,7 @@ agx_trace_g18_compute_launch(struct agx_batch *batch, uint32_t start,
                              uint64_t shader_va, size_t shader_size,
                              uint32_t scratch_bytes)
 {
-   if (!getenv("ASAHI_G18_RESOURCE_TRACE"))
+   if (!agx_env_flag(AGX_ENV_G18_RESOURCE_TRACE))
       return;
    const uint8_t *shader = shader_bo ? agx_bo_map(shader_bo) : NULL;
    if (!shader || shader_va < shader_bo->va->addr ||
@@ -9654,7 +9654,7 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
       if (surf->texture == NULL)
          continue;
 
-      if (dev->chip == AGX_CHIP_G18G && getenv("ASAHI_G18_RESOURCE_TRACE")) {
+      if (dev->chip == AGX_CHIP_G18G && agx_env_flag(AGX_ENV_G18_RESOURCE_TRACE)) {
          const struct agx_resource *rsrc = agx_resource(surf->texture);
          fprintf(stderr,
                  "G18_ATTACHMENT_TRACE rt=%u store=%u partial=%u "
@@ -12187,7 +12187,7 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
        * draws and the separately guarded early/depth-NEVER/multisample paths. */
       if (dev->chip == AGX_CHIP_G18G && ctx->fs->so &&
           ctx->fs->so->info.writes_memory && fs && fs->bo &&
-          getenv("NEO_AGX_BINARY_DIAGNOSTICS") && fs->size <= 65536 &&
+          agx_env_flag(AGX_ENV_NEO_BINARY_DIAGNOSTICS) && fs->size <= 65536 &&
           fs->entry_offset <= fs->bo->size &&
           fs->size <= fs->bo->size - fs->entry_offset) {
          const uint8_t *mapping = agx_bo_map(fs->bo);
@@ -12483,7 +12483,7 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
          dev->chip == AGX_CHIP_G18G && !rast->base.flatshade_first ? 2 : 0,
    };
    if (graphics_fields.fragment_writes_nothing &&
-       getenv("ASAHI_G18_RESOURCE_TRACE"))
+       agx_env_flag(AGX_ENV_G18_RESOURCE_TRACE))
       fprintf(stderr, "G18_FRAGMENT_WRITES_NOTHING cbufs=%u pass=%u\n",
               batch->key.nr_cbufs, fragment_pass);
    struct agx_ppp_hal300_graphics_core graphics;
@@ -15147,7 +15147,7 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       return;
    }
 
-   if (dev->chip == AGX_CHIP_G18G && getenv("NEO_AGX_DRAW_DIAGNOSTICS"))
+   if (dev->chip == AGX_CHIP_G18G && agx_env_flag(AGX_ENV_NEO_DRAW_DIAGNOSTICS))
       fprintf(stderr, "NEO_DRAW queue=%u batch=%u draw=%u width=%u height=%u samples=%u mode=%u count=%u count_known=%u instances=%u index_size=%u vs=%#llx fs=%#llx\n",
               ctx->queue_id, agx_batch_idx(batch), batch->draws,
               batch->key.width, batch->key.height, batch->key.samples,
