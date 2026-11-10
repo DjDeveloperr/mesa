@@ -279,10 +279,6 @@ struct agx_shader_info {
    uint16_t agx3_preamble_staging_halfs;
    bool agx3_preamble_staging_known;
 
-   /* Live uniform inputs after optimization, lowering, and register allocation.
-    * Retained separately from resource sizes and hardware entry policy. */
-   struct agx_ioto_cprog_inputs agx3_preamble_encoded_inputs;
-
    /* Output mask set during driver lowering */
    uint64_t outputs;
 
@@ -333,7 +329,6 @@ struct agx_precompiled_kernel_info {
    uint16_t agx3_staging_halfs;
    bool agx3_preamble_staging_known;
    uint16_t agx3_preamble_staging_halfs;
-   struct agx_ioto_cprog_inputs agx3_preamble_encoded_inputs;
 
    /* AGX3 kernels read the printf buffer address from a 64-bit uniform at this
     * half, the first multiple of 4 after their arguments, or 0 if they do not
@@ -374,7 +369,6 @@ agx_compact_kernel_info(struct agx_shader_info *info)
       .agx3_staging_halfs = info->agx3_staging_halfs,
       .agx3_preamble_staging_known = info->agx3_preamble_staging_known,
       .agx3_preamble_staging_halfs = info->agx3_preamble_staging_halfs,
-      .agx3_preamble_encoded_inputs = info->agx3_preamble_encoded_inputs,
       .agx3_tps_size =
          MAX2(info->scratch_size, info->agx3_spectpr_scratch_size),
    };
