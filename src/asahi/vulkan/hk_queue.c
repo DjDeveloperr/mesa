@@ -24,6 +24,7 @@
 #include "hk_cmd_buffer.h"
 #include "hk_frame_anatomy.h"
 #include "hk_device.h"
+#include "hk_entrypoints.h"
 #include "hk_drm_render_core.h"
 #include "hk_drm_prior_core.h"
 #include "hk_execution_allowance.h"
@@ -50,6 +51,7 @@
 
 #include "hk_private.h"
 #include "layout.h"
+#include "vk_common_entrypoints.h"
 #include "vk_drm_syncobj.h"
 #include "vk_sync.h"
 
@@ -1912,7 +1914,7 @@ hk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
    struct hk_queue *queue = container_of(vk_queue, struct hk_queue, vk);
    struct hk_device *dev = hk_queue_device(queue);
 
-   if (vk_queue_is_lost(&queue->vk))
+   if (vk_device_is_lost_no_report(&dev->vk))
       return VK_ERROR_DEVICE_LOST;
 
    VkResult result = queue_submit(dev, queue, submit);
@@ -1935,6 +1937,42 @@ hk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
    }
 
    return result;
+}
+
+void
+hk_device_quiesce_lost_submissions(struct hk_device *dev)
+{
+   if (!agx_chip_g17_m5(dev->dev.chip) ||
+       !vk_device_is_lost_no_report(&dev->vk))
+      return;
+
+   /* GPU storage remains pinned separately. This protects host object data
+    * and sync implementations referenced by deferred/threaded submissions.
+    */
+   vk_foreach_queue(queue, &dev->vk)
+      vk_queue_wait_lost_submissions(queue);
+}
+
+/* A pending host submission also retains raw semaphore/fence sync pointers.
+ * Join or cancel that host work before freeing the sync implementation. */
+VKAPI_ATTR void VKAPI_CALL
+hk_DestroySemaphore(VkDevice _device, VkSemaphore semaphore,
+                    const VkAllocationCallbacks *pAllocator)
+{
+   VK_FROM_HANDLE(hk_device, dev, _device);
+   if (semaphore != VK_NULL_HANDLE)
+      hk_device_quiesce_lost_submissions(dev);
+   vk_common_DestroySemaphore(_device, semaphore, pAllocator);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+hk_DestroyFence(VkDevice _device, VkFence fence,
+                const VkAllocationCallbacks *pAllocator)
+{
+   VK_FROM_HANDLE(hk_device, dev, _device);
+   if (fence != VK_NULL_HANDLE)
+      hk_device_quiesce_lost_submissions(dev);
+   vk_common_DestroyFence(_device, fence, pAllocator);
 }
 
 static enum drm_asahi_priority
