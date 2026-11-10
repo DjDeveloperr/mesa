@@ -1841,30 +1841,35 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
     *
     * One submission per dispatch. When a render follows, it is the tail
     * submission and owns the output syncs; with no render the final dispatch
-    * takes that role, so the loop below stops one short. */
+    * takes that role, so the loop below stops one short.
+    *
+    * The G17 runtime that runs G17S and G17C has none of that restriction:
+    * it takes a mixed command array and orders it with barriers, so the
+    * recorded dispatches go as separate commands of this one submission. So
+    * does G17G where it runs on that runtime (agx_m5_render_resources); only
+    * on the M5 runtime of older kernels does it take one dispatch per
+    * submission. */
+   const bool m5_compute_commands = agx_m5_render_resources(dev) && compute;
    const bool m5_split_prepass =
-      (dev->chip == AGX_CHIP_G17G || dev->chip == AGX_CHIP_G18G) && compute;
+      (dev->chip == AGX_CHIP_G17G || dev->chip == AGX_CHIP_G18G) && compute &&
+      !m5_compute_commands;
    const unsigned m5_split_count =
       !m5_split_prepass  ? 0
       : render           ? cdm_dispatch_count
       : cdm_dispatch_count ? cdm_dispatch_count - 1
                                   : 0;
 
-   /* The G17 runtime that runs G17S and G17C has none of that restriction:
-    * it takes a mixed command array and orders it with barriers, so the
-    * recorded dispatches go as separate commands of this one submission. */
-   const bool m5_compute_commands = agx_m5_render_resources(dev) && compute;
-
    /* Compute commands in this submission, which the render waits on. */
    unsigned compute_commands = 0;
 
    /* Submit! */
    if (compute && !split_compute && m5_compute_commands) {
-      /* The G17 runtime (M5 Pro, M5 Max) takes a mixed command array, so
-       * each recorded dispatch is its own compute command here, the
-       * single-dispatch stream the Gallium M5 compute path builds and G17G
-       * submits one ioctl at a time. Command i waits on the i before it and
-       * on all earlier work; the storage list precedes them all. */
+      /* The G17 runtime (M5 Pro, M5 Max, and M5 on it) takes a mixed
+       * command array, so each recorded dispatch is its own compute command
+       * here, the single-dispatch stream the Gallium M5 compute path builds
+       * and the M5 runtime takes one ioctl at a time. Command i waits on the
+       * i before it and on all earlier work; the storage list precedes them
+       * all. */
       ASSERTED bool encoded =
          agx_append_m5_compute_resources(dev, batch, &cmdbuf);
       assert(encoded);
