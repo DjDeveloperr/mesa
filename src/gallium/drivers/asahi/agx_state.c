@@ -5290,8 +5290,6 @@ agx_gallium_g17p_tile_layout_supported(struct agx_tilebuffer_layout *tib)
     * that allocation through the same bounded RT0 contract Honeykrisp uses. */
    struct agx_tilebuffer_layout physical = *tib;
    physical.layered = false;
-   if (tib->layered && agx_g17p_rgba8_mrt_mask(&physical) > 1)
-      return false;
    return agx_g17p_rt0_tile_layout_supported(&physical);
 }
 
