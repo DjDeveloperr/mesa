@@ -13230,18 +13230,6 @@ agx_compile_function_nir_attempt(nir_shader *nir, nir_function_impl *impl,
 #endif
 
 
-   /* There is no AGX3 disassembler, so dump the bytes instead: this is the
-    * only way to see what the packer actually emitted for a shader that
-    * compiles but renders wrongly, and the scratch decoder reads it
-    * directly. */
-   if (dump_shaders && ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2) {
-      fprintf(stdout, "agx3 binary (%u bytes):\n",
-              (unsigned)(binary->size - offset));
-      for (unsigned i = offset; i < binary->size; ++i)
-         fprintf(stdout, "%02x", ((const uint8_t *)binary->data)[i]);
-      fprintf(stdout, "\n\n");
-   }
-
    if ((dump_shaders || selftest) &&
        ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX2) {
       FILE *fp = selftest ? fopen("/dev/null", "w") : stdout;
