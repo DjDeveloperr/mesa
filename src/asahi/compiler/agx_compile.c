@@ -16018,6 +16018,9 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
           nir->info.fs.needs_full_quad_helper_invocations) &&
          (nir->info.fs.quad_derivatives || agx_fs_takes_derivatives(nir));
 
+      info->needs_full_quads =
+         nir->info.fs.needs_full_quad_helper_invocations;
+
       /* Writing the sample mask requires tag writes */
       info->tag_write_disable &= !info->writes_sample_mask;
 

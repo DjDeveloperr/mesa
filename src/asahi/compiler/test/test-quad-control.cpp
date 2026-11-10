@@ -196,6 +196,7 @@ TEST(QuadControl, OnlyDerivativesDisableG17PTriangleMerging)
       agx_shader_part part = {};
       ASSERT_TRUE(agx_compile_shader_nir(b.shader, &key, &part));
       EXPECT_EQ(part.info.needs_quad_derivatives, derivative);
+      EXPECT_TRUE(part.info.needs_full_quads);
       free(part.binary);
       ralloc_free(b.shader);
    }

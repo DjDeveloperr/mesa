@@ -8823,8 +8823,24 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
     * payload word, masked by 0xe6600000 and ORed with 0x200. It is not the
     * older-generation FRAGMENT_CONTROL location in our PRIMARY record.
     */
-   const uint32_t linked_fragment_control =
+   uint32_t linked_fragment_control =
       linked_fs->b.fragment_control.opaque[0];
+
+   /* The rasterizer clips x/y at about +-1.5 NDC, and only bit 26 clear
+    * stitches the pieces back into whole quads. Native keeps bit 26 for
+    * every punch-through (type 2) draw, so Metal splits those quads too.
+    * Single-sample type 3 is the native state with bit 26 clear (Metal emits
+    * it for discard with early fragment tests, without blending), so a
+    * shader that needs full quads is promoted to it. A derivative shader
+    * keeps bit 26 regardless (shader_tri_merge_disable), so it stays type 2
+    * and keeps hidden-surface removal. */
+   if ((linked_fragment_control >> 29) == AGX_PASS_TYPE_PUNCH_THROUGH &&
+       render->tilebuffer.nr_samples == 1 && fs->b.info.needs_full_quads &&
+       !fs->b.info.needs_quad_derivatives) {
+      linked_fragment_control =
+         (linked_fragment_control & ~BITFIELD_RANGE(29, 3)) |
+         (AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH << 29);
+   }
    const uint32_t pass_type = linked_fragment_control >> 29;
    if (pass_type != AGX_PASS_TYPE_OPAQUE &&
        pass_type != AGX_PASS_TYPE_TRANSLUCENT &&
@@ -8882,12 +8898,13 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
          (!agx_chip_tri_merge_across_side_effects(dev->dev.chip) &&
           (linked_fragment_control & (UINT32_C(1) << 26))),
 
-      /* Native forces bit26 for type2 and conditionally for type3 from the
-       * draw-buffer state. Keep the already-qualified conservative type3
-       * policy until that draw-buffer field is decoded. */
+      /* Native forces bit26 for type 2, and for type 3 only in a multisampled
+       * pass: Metal on the M4 Pro clears it for single-sample type 3 in every
+       * state tried, and a 1x/4x pair differs in this bit alone. */
       .coverage_tri_merge_disable =
          pass_type == AGX_PASS_TYPE_PUNCH_THROUGH ||
-         pass_type == AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH,
+         (pass_type == AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH &&
+          render->tilebuffer.nr_samples > 1),
 
       /* encodeISPPrimitiveType selects the runtime override for points,
        * lines, and non-filled triangles, then applies it to both controls. */
