@@ -6218,9 +6218,11 @@ agx_update_descriptors(struct agx_batch *batch, struct agx_compiled_shader *cs)
       agx_upload_samplers(batch, cs, stage);
 
    struct agx_stage_uniforms *unif = &batch->stage_uniforms[stage];
+   /* Stop before the G18G-only fields that follow custom_border_compare_func;
+    * no other chip reads them. */
    const size_t size =
       agx_shadow_gather_custom_border(agx_device(ctx->base.screen)->chip)
-         ? sizeof(*unif)
+         ? offsetof(struct agx_stage_uniforms, custom_border_compare)
          : offsetof(struct agx_stage_uniforms, custom_border_compare_func);
 
    batch->uniforms.tables[AGX_SYSVAL_STAGE(stage)] =
