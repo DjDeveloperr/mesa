@@ -4,7 +4,7 @@
 libasahi_noop_drm_shim = shared_library(
   'asahi_noop_drm_shim',
   ['asahi_noop.c', 'asahi_g15s_stream_gate.c',
-   'asahi_g17p_stream_validator.c'],
+   'asahi_g17p_stream_validator.c', 'asahi_m5_submit_gate.c'],
   objects : libasahi_decode.extract_objects(
     'agx3_cdm_decode_core.c',
     'agx_ioto_core.c',

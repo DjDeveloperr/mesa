@@ -585,16 +585,34 @@ agx_cmd_header(bool compute, uint16_t barrier_vdm, uint16_t barrier_cdm)
    };
 }
 
+/*
+ * Whether the kernel sizes each render's firmware pools from the programs the
+ * render runs. The M5 Pro and M5 Max (G17S, G17C) run on the G17 kernel
+ * runtime, which reports this contract as DRM_ASAHI_FEATURE_RENDER_RESOURCES:
+ * every render must follow a DRM_ASAHI_SET_RENDER_RESOURCES(_V2) list in its
+ * submission (SUBMIT fails with EINVAL otherwise), and compute commands take
+ * a DRM_ASAHI_SET_COMPUTE_RESOURCES list when the kernel reports
+ * DRM_ASAHI_FEATURE_COMPUTE_RESOURCES. The M5 (G17G) runtime reports neither.
+ */
+static inline bool
+agx_m5_render_resources(const struct agx_device *dev)
+{
+   return agx_chip_g17_m5(dev->chip) &&
+          (dev->params.features & DRM_ASAHI_FEATURE_RENDER_RESOURCES);
+}
+
 /* Size of the render command passed to the kernel. drm_asahi_cmd_render grew
  * the high words of the background/EOT resource specifiers for the native
  * AGX3 path, whose USC window sits at 2^40, and kernels that predate them
- * reject the longer packet with EINVAL. Every other chip keeps the original
- * layout, as Honeykrisp does in hk_drm_render_command_size().
+ * reject the longer packet with EINVAL. The G17 runtime's M5 command set
+ * reads them too (the M5 colour background's specifier is
+ * 0xffff800000000040). Every other chip keeps the original layout, as
+ * Honeykrisp does in hk_drm_render_command_size().
  */
 static inline uint16_t
 agx_render_command_size(const struct agx_device *dev)
 {
-   return agx_chip_native_agx3(dev->chip)
+   return agx_chip_native_agx3(dev->chip) || agx_m5_render_resources(dev)
              ? sizeof(struct drm_asahi_cmd_render)
              : offsetof(struct drm_asahi_cmd_render, bg_eot_rsrc_spec_hi);
 }

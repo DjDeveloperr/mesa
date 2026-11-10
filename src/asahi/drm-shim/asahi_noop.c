@@ -15,6 +15,7 @@
 #include <sys/mman.h>
 
 #include "asahi_g15s_stream_gate.h"
+#include "asahi_m5_submit_gate.h"
 #include "asahi_g17p_stream_validator.h"
 #include "util/macros.h"
 #include "util/simple_mtx.h"
@@ -387,6 +388,44 @@ static const struct drm_asahi_params_global params_g17s = {
    .usc_generation = 3, .gpu_hal_generation = DRM_ASAHI_GPU_HAL_300,
 };
 
+/* The M5 Pro as the G17 kernel runtime presents it: GET_PARAMS of the E2
+ * kernel on a J716s (features 0x23cfe7c06, two clusters of ten cores): no
+ * soft faults, the M5 command set's features (program storage lists, shader
+ * write classes, staged renders, whole attachment renders, task/mesh
+ * storage, compressed multisample depth and stencil), exact prior and
+ * fragment barriers, cumulative signals and few-primitive renders. The VM
+ * status (ASAHI_SHIM_VM_STATUS adds it) and independent queue features are
+ * left out because this shim does not emulate their ioctls by default.
+ * Select with ASAHI_SHIM_CHIP=g17s-kernel; submissions then pass the M5
+ * submission gate (asahi_m5_submit_gate.c), which refuses what that kernel
+ * refuses. */
+static const struct drm_asahi_params_global params_g17s_kernel = {
+   .features = DRM_ASAHI_FEATURE_PER_COMMAND_INPUT_SYNCS |
+               DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS |
+               DRM_ASAHI_FEATURE_FRAGMENT_BARRIERS |
+               DRM_ASAHI_FEATURE_FEW_PRIMITIVES |
+               DRM_ASAHI_FEATURE_CUMULATIVE_SIGNALS |
+               DRM_ASAHI_FEATURE_RENDER_RESOURCES |
+               DRM_ASAHI_FEATURE_RENDER_RESOURCES_V2 |
+               DRM_ASAHI_FEATURE_COMPUTE_RESOURCES |
+               DRM_ASAHI_FEATURE_SPARSE_TILES |
+               DRM_ASAHI_FEATURE_COMPUTE_MATRIX |
+               DRM_ASAHI_FEATURE_RENDER_SHADER_WRITES |
+               DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES |
+               DRM_ASAHI_FEATURE_WHOLE_ATTACHMENT_RENDERS |
+               DRM_ASAHI_FEATURE_TASK_MESH_STORAGE |
+               DRM_ASAHI_FEATURE_M5_DEPTH_MSAA_COMPRESSION |
+               DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION,
+   .gpu_generation = 17, .gpu_variant = 'S', .gpu_revision = 17,
+   .chip_id = 0x6050, .num_dies = 1, .num_clusters_total = 2,
+   .num_cores_per_cluster = 10, .core_masks = {0x3ff, 0x3ff},
+   .vm_start = 0x4000, .vm_end = (1ull << 42) - 0x8000ull,
+   .vm_kernel_min_size = 0x20000000, .max_commands_per_submission = 64,
+   .max_attachments = 16, .max_frequency_khz = 1620000,
+   .command_timestamp_frequency_hz = 1000000000,
+   .usc_generation = 3, .gpu_hal_generation = DRM_ASAHI_GPU_HAL_300,
+};
+
 /* M5 Pro with the task (object->mesh) mesh rendering buffer bound
  * (m5_mesh_storage_chunks != 0): DRM_ASAHI_FEATURE_TASK_MESH_STORAGE. */
 static const struct drm_asahi_params_global params_g17s_task = {
@@ -489,6 +528,8 @@ shim_params(void)
 
    if (chip && !strcmp(chip, "g17s-task"))
       return &params_g17s_task;
+   if (chip && !strcmp(chip, "g17s-kernel"))
+      return &params_g17s_kernel;
 
    if (chip && !strcmp(chip, "g13x"))
       return &params_g13x;
@@ -1942,6 +1983,60 @@ g15s_submit_gate(int fd, const struct drm_asahi_submit *submit)
    return 0;
 }
 
+/* M5 submission gate totals. ASAHI_SHIM_M5_GATE=1 applies the gate to any
+ * M5 identity, =warn reports refusals and accepts the submission, =0 turns
+ * it off for g17s-kernel. ASAHI_SHIM_M5_EXPECT_VALID makes a refusal fail
+ * the run at exit, so a client that carries on after an EINVAL cannot pass. */
+static struct asahi_m5_gate_stats m5_gate_stats;
+static unsigned m5_gate_submits, m5_gate_refused;
+
+static bool
+shim_m5_gate(void)
+{
+   const char *gate = getenv("ASAHI_SHIM_M5_GATE");
+   if (gate)
+      return strcmp(gate, "0") != 0;
+   return shim_params() == &params_g17s_kernel;
+}
+
+static void __attribute__((destructor))
+report_m5_gate(void)
+{
+   if (!m5_gate_submits)
+      return;
+
+   fprintf(stderr,
+           "shim: M5 gate: %u submits, %u renders, %u computes, %u render "
+           "programs, %u compute programs; %u refused\n",
+           m5_gate_submits, m5_gate_stats.renders, m5_gate_stats.computes,
+           m5_gate_stats.render_programs, m5_gate_stats.compute_programs,
+           m5_gate_refused);
+
+   if (getenv("ASAHI_SHIM_M5_EXPECT_VALID") && m5_gate_refused)
+      _Exit(EXIT_FAILURE);
+}
+
+static int
+m5_submit_gate(const struct drm_asahi_submit *submit)
+{
+   const char *reason;
+   m5_gate_submits++;
+   const int ret = asahi_m5_submit_gate((const void *)(uintptr_t)submit->cmdbuf,
+                                        submit->cmdbuf_size, shim_features(),
+                                        &m5_gate_stats, &reason);
+   if (!ret)
+      return 0;
+
+   m5_gate_refused++;
+   fprintf(stderr, "shim: M5 gate refused submit %u (%s): %s\n", submit_calls,
+           strerror(-ret), reason);
+   const char *gate = getenv("ASAHI_SHIM_M5_GATE");
+   if (gate && !strcmp(gate, "warn"))
+      return 0;
+   errno = -ret;
+   return -1;
+}
+
 static int
 asahi_ioctl_submit_unlocked(int fd, unsigned long request, void *arg)
 {
@@ -1968,6 +2063,13 @@ asahi_ioctl_submit_unlocked(int fd, unsigned long request, void *arg)
 
    if (shim_g15_kernel())
       return g15s_submit_gate(fd, submit);
+
+   if (shim_params()->gpu_hal_generation == DRM_ASAHI_GPU_HAL_300 &&
+       shim_m5_gate()) {
+      const int ret = m5_submit_gate(submit);
+      if (ret)
+         return ret;
+   }
 
    /* The kernel's native-context gate runs for every render submission, not
     * only when the stream oracle is enabled, so check it first. */

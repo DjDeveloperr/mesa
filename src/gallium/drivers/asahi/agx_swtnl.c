@@ -1006,7 +1006,7 @@ agx_swtnl_delete_shader(struct agx_context *ctx, struct agx_uncompiled_shader *s
 bool
 agx_swtnl_applies(struct agx_context *ctx)
 {
-   if (agx_device(ctx->base.screen)->chip != AGX_CHIP_G17G ||
+   if (!agx_chip_g17_m5(agx_device(ctx->base.screen)->chip) ||
        ctx->swtnl_inner || getenv("AGX_NO_SWTNL") ||
        (!ctx->stage[MESA_SHADER_GEOMETRY].shader &&
         !ctx->stage[MESA_SHADER_TESS_EVAL].shader))
