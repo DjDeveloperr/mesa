@@ -2622,7 +2622,8 @@ agx3_image_write_copy(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
 
 static bool
 agx3_emit_storage_image_write(struct util_dynarray *emission,
-                              enum agx_isa_encoding enc, const agx_instr *I,
+                              enum agx_isa_encoding enc, enum agx_chip chip,
+                              const agx_instr *I,
                               uint16_t wait_mask,
                               struct agx3_staging_banks *banks,
                               uint16_t bank_floor, uint16_t *outstanding,
@@ -2669,10 +2670,15 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
     * layer, and 1D stores as 2D. G17G writes a layered image as 3D, the layer
     * staged like z: Gallium describes its PBE as 3D (agx_batch_upload_pbe), a
     * single-level 3D slice being a 2D-array layer. The G17P PACK_IMGWIR layer
-    * did not reach the G17G write (every layer landed in layer 0). */
-   const bool array = I->dim == AGX_DIM_2D_ARRAY && !m5;
+    * did not reach the G17G write (every layer landed in layer 0). G17C takes
+    * the layer operand, and its array descriptors (Honeykrisp keeps them, and
+    * Gallium does on G17C) need it: their layer count does not shrink with
+    * the selected mip level, unlike 3D depth.
+    */
+   const bool layer_operand = !m5 || chip == AGX_CHIP_G17C;
+   const bool array = I->dim == AGX_DIM_2D_ARRAY && layer_operand;
    const bool three_d = I->dim == AGX_DIM_3D ||
-                        (m5 && I->dim == AGX_DIM_2D_ARRAY);
+                        (!layer_operand && I->dim == AGX_DIM_2D_ARRAY);
    const unsigned coords = (array || three_d) ? 3 : 2;
    if ((!m5 && enc != AGX_ISA_ENCODING_AGX3B) || I->nr_dests != 0 ||
        (m5 && ((I->dim != AGX_DIM_2D && !array && !three_d) ||
@@ -14784,7 +14790,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          if (I->op == AGX_OPCODE_IMAGE_WRITE) {
             uint8_t write_slot;
-            if (!agx3_emit_storage_image_write(emission, enc, I, wait,
+            if (!agx3_emit_storage_image_write(emission, enc,
+                                               ctx->key->dev.chip, I, wait,
                                                &staging_banks,
                                                image_write_bank_floor,
                                                &outstanding, &write_slot,
