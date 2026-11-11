@@ -788,12 +788,13 @@ hk_flush_bind(struct hk_bind_builder *b)
 static VkResult
 hk_sparse_buffer_map_commit(struct hk_bind_builder *b)
 {
-   if (!b->buffer || !b->buffer->sparse_map)
+   if (!b->buffer || (!b->buffer->sparse_map &&
+                      !hk_buffer_in_physical_sparse_map(b->dev, b->buffer)))
       return VK_SUCCESS;
 
    struct hk_sparse_buffer_map_header *header =
-      agx_bo_map(b->buffer->sparse_map);
-   uint32_t *map = (uint32_t *)(header + 1);
+      b->buffer->sparse_map ? agx_bo_map(b->buffer->sparse_map) : NULL;
+   uint32_t *map = header ? (uint32_t *)(header + 1) : NULL;
    struct drm_asahi_gem_bind_op *ops = b->binds.data;
    const unsigned count = util_dynarray_num_elements(
       &b->binds, struct drm_asahi_gem_bind_op);
@@ -813,7 +814,7 @@ hk_sparse_buffer_map_commit(struct hk_bind_builder *b)
       if (result != VK_SUCCESS)
          return result;
 
-      for (uint64_t page = 0; page < pages; ++page) {
+      for (uint64_t page = 0; map && page < pages; ++page) {
          if (first + page >= b->buffer->sparse_map_entries)
             break;
 
@@ -826,8 +827,9 @@ hk_sparse_buffer_map_commit(struct hk_bind_builder *b)
       }
    }
 
-   agx_bo_assert_range(b->buffer->sparse_map, 0,
-                              b->buffer->sparse_map->size);
+   if (b->buffer->sparse_map)
+      agx_bo_assert_range(b->buffer->sparse_map, 0,
+                          b->buffer->sparse_map->size);
 
    return VK_SUCCESS;
 }

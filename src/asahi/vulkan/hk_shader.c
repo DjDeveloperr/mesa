@@ -1677,6 +1677,84 @@ lower_physical_sparse_load(nir_builder *b, nir_intrinsic_instr *intr,
 }
 
 
+/*
+ * Sparse residency for a texel buffer on G13 and G14.
+ *
+ * hk_buffer_view.c builds a texel buffer as a plain linear 2D texture over
+ * the buffer's read-only alias, so the texture unit has no residency to
+ * report and every sparse texel fetch or read comes back resident.  Take the
+ * residency of the texel's page from the device-wide map of non-resident
+ * sparse pages instead.  The data needs no masking: unbound pages read as
+ * zero through the read-only alias.
+ */
+static bool
+lower_sparse_texel_buffer_residency(nir_builder *b, nir_instr *instr,
+                                    void *data)
+{
+   const struct hk_device *dev = data;
+   nir_def *handle, *coord, *def;
+
+   if (instr->type == nir_instr_type_tex) {
+      nir_tex_instr *tex = nir_instr_as_tex(instr);
+      if (!tex->is_sparse || tex->sampler_dim != GLSL_SAMPLER_DIM_BUF)
+         return false;
+
+      const int handle_idx =
+         nir_tex_instr_src_index(tex, nir_tex_src_texture_handle);
+      const int coord_idx = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+      if (handle_idx < 0 || coord_idx < 0)
+         return false;
+
+      handle = tex->src[handle_idx].src.ssa;
+      coord = tex->src[coord_idx].src.ssa;
+      def = &tex->def;
+   } else if (instr->type == nir_instr_type_intrinsic) {
+      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+      if (intr->intrinsic != nir_intrinsic_bindless_image_sparse_load ||
+          nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_BUF)
+         return false;
+
+      handle = intr->src[0].ssa;
+      coord = intr->src[1].ssa;
+      def = &intr->def;
+   } else {
+      return false;
+   }
+
+   /* The lookup has control flow, so build it ahead of the access: the code
+    * that patches the result below must share the access's block. */
+   b->cursor = nir_before_instr(instr);
+
+   nir_def *table = nir_load_root_agx(b);
+#define ROOT_FIELD(field) nir_load_global_constant( \
+   b, 1, 64, nir_iadd_imm(b, table, hk_root_descriptor_offset(field)), \
+   .align_mul = 8)
+   nir_def *map = ROOT_FIELD(physical_sparse_map);
+   nir_def *heap_base = ROOT_FIELD(physical_sparse_base);
+   nir_def *heap_size = ROOT_FIELD(physical_sparse_size);
+#undef ROOT_FIELD
+
+   nir_def *nonresident = libagx_buffer_texture_nonresident(
+      b, nir_load_from_texture_handle_agx(b, handle),
+      nir_channel(b, coord, 0), map, heap_base, heap_size,
+      nir_imm_int64(b, dev->dev.sparse_ro_offset));
+
+   b->cursor = nir_after_instr(instr);
+
+   /* The residency code is the last component; bit 0 set is non-resident. */
+   const unsigned code_idx = def->num_components - 1;
+   nir_def *comps[NIR_MAX_VEC_COMPONENTS];
+   for (unsigned c = 0; c < code_idx; c++)
+      comps[c] = nir_channel(b, def, c);
+   comps[code_idx] =
+      nir_bcsel(b, nir_ine_imm(b, nonresident, 0),
+                nir_imm_intN_t(b, 1, def->bit_size),
+                nir_channel(b, def, code_idx));
+
+   nir_def_rewrite_uses_after(def, nir_vec(b, comps, def->num_components));
+   return true;
+}
+
 static bool
 lower_load_global_constant_offset_instr(nir_builder *b,
                                         nir_intrinsic_instr *intrin, void *data)
@@ -3418,6 +3496,13 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
                lower_agx3_robust_fetches, dev->dev.sparse_ro_offset,
                dev->vk.enabled_features.sparseResidencyBuffer);
    } else {
+      if (dev->physical_sparse_map &&
+          hk_sparse_texel_residency_from_map(&dev->dev)) {
+         NIR_PASS(_, nir, nir_shader_instructions_pass,
+                  lower_sparse_texel_buffer_residency, nir_metadata_none,
+                  (void *)dev);
+      }
+
       NIR_PASS(_, nir, agx_nir_lower_texture_for_generation,
                agx_chip_descriptor_generation(dev->dev.chip));
    }

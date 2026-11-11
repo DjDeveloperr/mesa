@@ -329,7 +329,7 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
       }
    }
 
-   if (buffer->sparse_map) {
+   if (hk_buffer_in_physical_sparse_map(dev, buffer)) {
       VkResult result = hk_update_physical_sparse_map(
          dev, buffer->va->addr, align64(buffer->vk.size, AIL_PAGESIZE), true);
       if (result != VK_SUCCESS) {
@@ -365,7 +365,7 @@ hk_DestroyBuffer(VkDevice device, VkBuffer _buffer,
 
    hk_device_quiesce_lost_submissions(dev);
 
-   if (buffer->sparse_map)
+   if (hk_buffer_in_physical_sparse_map(dev, buffer))
       hk_update_physical_sparse_map(dev, buffer->va->addr,
          align64(buffer->vk.size, AIL_PAGESIZE), false);
 
