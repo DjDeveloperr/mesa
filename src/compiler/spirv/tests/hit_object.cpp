@@ -98,6 +98,8 @@ TEST_F(HitObject, record_from_query_operands)
       nir_intrinsic_instr *record =
          find_intrinsic(nir_intrinsic_hit_object_record_from_query, i);
       ASSERT_NE(record, nullptr);
+      ASSERT_TRUE(nir_src_is_const(record->src[2]));
+      ASSERT_TRUE(nir_src_is_const(record->src[3]));
       EXPECT_EQ(nir_src_as_uint(record->src[2]), i ? 9u : 7u);
       EXPECT_EQ(nir_src_as_uint(record->src[3]), i ? 0x42u : 0u);
       EXPECT_EQ(record->num_components, i ? 4u : 2u);
