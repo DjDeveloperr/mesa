@@ -1586,6 +1586,15 @@ hk_get_device_properties(const struct agx_device *dev,
       properties->sparseResidencyNonResidentStrict =
          instance->drirc.misc.sparse_strict_residency;
 
+   /* G13 and G14 back the writable alias of an unbound page with the shared
+    * fill page, as G17P does: a store or copy into an unbound page is read
+    * back afterwards, and through the writable alias any unbound page returns
+    * what another one received.  Same rule as G17P. */
+   if (dev->chip == AGX_CHIP_G13G || dev->chip == AGX_CHIP_G13X ||
+       dev->chip == AGX_CHIP_G14G || dev->chip == AGX_CHIP_G14X)
+      properties->sparseResidencyNonResidentStrict =
+         instance->drirc.misc.sparse_strict_residency;
+
    if (agx_chip_native_agx3(dev->chip)) {
       /* Measured per operation under the G17P drm-shim:
        *
