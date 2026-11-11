@@ -1336,9 +1336,11 @@ agx_open_device(void *memctx, struct agx_device *dev)
    }
 
    /* Keep captured addresses unavailable to ordinary allocations between
-    * capture and replay. Reserve after all fixed firmware/alias holes, and
-    * for native AGX3 and M5 using the common allocator; other winsyses own their VA. */
-   if (agx_chip_native_agx3(dev->chip) || agx_chip_g17_m5(dev->chip)) {
+    * capture and replay, on every chip that uses the common allocator: on
+    * G13/G14 too, a captured address freed by the application is otherwise
+    * handed to the next ordinary allocation, and replaying it fails.
+    * Reserve after all fixed firmware/alias holes; virtio owns its VA. */
+   if (!dev->is_virtio) {
       dev->replay_heap_initialized = agx_capture_replay_heap_init(
          &dev->main_heap, &dev->replay_heap, user_size);
       if (!dev->replay_heap_initialized) {
