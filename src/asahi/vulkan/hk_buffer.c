@@ -240,6 +240,12 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
 
       if (!buffer->va) {
          vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
+         /* A replay address that is already taken is the application's
+          * error to handle, not an out-of-memory condition. */
+         if (bda_fixed_addr != 0)
+            return vk_errorf(dev, VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS,
+                             "Capture/replay address %#llx is in use",
+                             (unsigned long long)bda_fixed_addr);
          return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
                           "Sparse VMA allocation failed");
       }
