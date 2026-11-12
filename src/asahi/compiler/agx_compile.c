@@ -12569,7 +12569,6 @@ agx_compile_function_nir_attempt(nir_shader *nir, nir_function_impl *impl,
        !agx3_reg_float_consts)
       NIR_PASS(_, nir, nir_move_output_stores_to_end);
 
-   struct agx_ioto_cprog_inputs preamble_inputs = {0};
    nir_index_blocks(impl);
    nir_index_ssa_defs(impl);
 
@@ -12820,9 +12819,8 @@ agx_compile_function_nir_attempt(nir_shader *nir, nir_function_impl *impl,
 
    /* A preamble runs before the main shader and is not supplied with its
     * per-invocation GPR inputs. Check this after DCE so a dead preload does
-    * not reject the shader, and before RA lowers PRELOAD away. Uniform
-    * sources are recorded separately; this does not qualify the AGX3
-    * loader/constant-program entry ABI. G18G only. */
+    * not reject the shader, and before RA lowers PRELOAD away. This does
+    * not qualify the AGX3 loader/constant-program entry ABI. G18G only. */
    if (ctx->is_preamble && agx_is_g18g(&ctx->key->dev)) {
       STATIC_ASSERT(AGX_NUM_UNIFORMS == AGX_IOTO_CPROG_UNIFORM_HALFS);
       agx_foreach_instr_global(ctx, I) {
@@ -13076,29 +13074,6 @@ agx_compile_function_nir_attempt(nir_shader *nir, nir_function_impl *impl,
       return false;
    }
 
-   /* Record the final encoded input set, after all lowering and allocation.
-    * Main-shader uniforms and eliminated preamble reads must not enter it. */
-   if (ctx->is_preamble && key->dev.encoding != AGX_ISA_ENCODING_AGX2) {
-      agx_foreach_instr_global(ctx, I) {
-         agx_foreach_src(I, s) {
-            agx_index src = I->src[s];
-            if (src.type != AGX_INDEX_UNIFORM)
-               continue;
-
-            const unsigned halves = agx_index_size_16(src);
-            if (src.value >= AGX_NUM_UNIFORMS ||
-                halves > AGX_NUM_UNIFORMS - src.value) {
-               ralloc_free(ctx);
-               return false;
-            }
-            for (unsigned h = src.value; h < src.value + halves; ++h)
-               preamble_inputs.uniform_halfs[h / 64] |=
-                  UINT64_C(1) << (h % 64);
-         }
-      }
-      preamble_inputs.known = true;
-   }
-
    if (agx_should_dump(nir, AGX_DBG_SHADERS))
       agx_print_shader(ctx, stdout);
 
@@ -13176,7 +13151,6 @@ agx_compile_function_nir_attempt(nir_shader *nir, nir_function_impl *impl,
       out->nr_preamble_gprs = legacy_scratch ? 256 : nr_gprs;
       out->agx3_preamble_staging_halfs = ctx->agx3_staging_halfs;
       out->agx3_preamble_staging_known = ctx->agx3_staging_known;
-      out->agx3_preamble_encoded_inputs = preamble_inputs;
    }
    else {
       out->nr_gprs = nr_gprs;
@@ -13229,18 +13203,6 @@ agx_compile_function_nir_attempt(nir_shader *nir, nir_function_impl *impl,
    bool selftest = false;
 #endif
 
-
-   /* There is no AGX3 disassembler, so dump the bytes instead: this is the
-    * only way to see what the packer actually emitted for a shader that
-    * compiles but renders wrongly, and the scratch decoder reads it
-    * directly. */
-   if (dump_shaders && ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2) {
-      fprintf(stdout, "agx3 binary (%u bytes):\n",
-              (unsigned)(binary->size - offset));
-      for (unsigned i = offset; i < binary->size; ++i)
-         fprintf(stdout, "%02x", ((const uint8_t *)binary->data)[i]);
-      fprintf(stdout, "\n\n");
-   }
 
    if ((dump_shaders || selftest) &&
        ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX2) {
