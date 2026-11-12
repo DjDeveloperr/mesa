@@ -2633,11 +2633,14 @@ agx_compile_nir_tile(struct agx_device *dev, nir_shader *nir,
       if (g18_shared_uniform_base)
          uniform_base = MAX2(uniform_base, AGX_ABI_G18_SHARED_UNIFORM_HALFS);
 
-      /* G17P's Ioto loader moves uniform dwords: lay the ranges out so
-       * that each starts at an even half and covers an even count. */
+      /* The native Ioto loaders (G17P, the M5 family, G18G) move uniform
+       * dwords: lay the ranges out so that each starts at an even half and
+       * covers an even count. The M5 family's program builder refuses any
+       * other shape, which dropped most GL fragment programs there. */
       NIR_PASS(_, nir, agx_nir_layout_uniforms, compiled,
                &key.reserved_preamble, uniform_base,
-               agx_native_graphics(dev) || dev->chip == AGX_CHIP_G18G);
+               agx_native_graphics(dev) || agx_chip_g17_m5(dev->chip) ||
+                  dev->chip == AGX_CHIP_G18G);
       if (agx_native_graphics(dev))
          NIR_PASS(_, nir, agx_nir_lower_g17p_storage_records,
                   texture_descriptor_size);
