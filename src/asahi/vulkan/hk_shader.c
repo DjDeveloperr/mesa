@@ -3053,6 +3053,15 @@ hk_ubo_loads_reorderable(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
+/* See image_load_needs_memory_path() in hk_nir_lower_descriptors.c: the
+ * multi-cluster AGX2 GPUs (G13 and G14 Pro/Max/Ultra). */
+static bool
+hk_coherent_images_in_memory(const struct agx_device *dev)
+{
+   return agx_chip_isa_encoding(dev->chip) == AGX_ISA_ENCODING_AGX2 &&
+          dev->params.num_clusters_total > 1;
+}
+
 static void
 hk_lower_nir(struct hk_device *dev, nir_shader *nir,
              const struct vk_pipeline_robustness_state *rs, bool is_multiview,
@@ -3228,7 +3237,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
             dev->dev.sparse_ro_offset,
             hk_device_physical(dev)->scaled_sampling,
             agx_chip_sampler_has_lod_bias(dev->dev.chip),
-            instance->drirc.misc.d3d_nearest_mip);
+            instance->drirc.misc.d3d_nearest_mip,
+            hk_coherent_images_in_memory(&dev->dev));
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
             nir_address_format_64bit_global);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ssbo,
