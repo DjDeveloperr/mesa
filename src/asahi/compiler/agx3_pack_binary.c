@@ -14592,9 +14592,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 ctx->stage == MESA_SHADER_VERTEX &&
                 I->src[3].type != AGX_INDEX_IMMEDIATE) ||
                ctx->stage == MESA_SHADER_FRAGMENT ||
+               ctx->stage == MESA_SHADER_MESH ||
                (enc == AGX_ISA_ENCODING_AGX3C &&
-                (ctx->stage == MESA_SHADER_MESH ||
-                 ctx->stage == MESA_SHADER_TASK)) ||
+                ctx->stage == MESA_SHADER_TASK) ||
                agx3_stage_runs_as_kernel(ctx->stage);
             /* imgwci takes its coordinates from staging halves 0/2, so in a
              * shader that also writes images a read stages its coordinates at
@@ -14965,12 +14965,16 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 I->lod_mode == AGX_LOD_MODE_LOD_GRAD_MIN);
             /* Native runtime-indexed vertex pipelines ground both a per-lane
              * explicit level and explicit gradients in every noncube sample
-             * dimension, including depth comparisons and array layers. */
+             * dimension, including depth comparisons and array layers. A G17P
+             * mesh program is VDM-launched like a vertex program and binds its
+             * textures through the vertex path, so it samples the same way. */
             const bool vertex_explicit_lod =
                (ctx->stage == MESA_SHADER_VERTEX ||
                 ctx->stage == MESA_SHADER_GEOMETRY ||
                 ctx->stage == MESA_SHADER_TESS_CTRL ||
-                ctx->stage == MESA_SHADER_TESS_EVAL) &&
+                ctx->stage == MESA_SHADER_TESS_EVAL ||
+                (enc == AGX_ISA_ENCODING_AGX3B &&
+                 ctx->stage == MESA_SHADER_MESH)) &&
                (I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
                 I->lod_mode == AGX_LOD_MODE_LOD_GRAD);
             /* Relocation is an operand-ABI property. Other forms retain
@@ -15942,16 +15946,18 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * (hk_launch_gs_prerast()), which runs one GS invocation per
              * thread. M5 object (task) and mesh programs read SR34 the same
              * way: a native G17G first-thread election in an object
-             * shader reads SR34 into a half register. */
+             * shader reads SR34 into a half register. A G17P mesh program is
+             * a VDM-launched threadgroup whose subgroups Apple's own mesh
+             * code reduces across (sRedumax in its write_uvb helper). */
             const bool subgroup_stage =
                ctx->stage == MESA_SHADER_COMPUTE ||
                ctx->stage == MESA_SHADER_VERTEX ||
                ctx->stage == MESA_SHADER_TESS_CTRL ||
                ctx->stage == MESA_SHADER_GEOMETRY ||
                ctx->stage == MESA_SHADER_FRAGMENT ||
+               ctx->stage == MESA_SHADER_MESH ||
                (enc == AGX_ISA_ENCODING_AGX3C &&
-                (ctx->stage == MESA_SHADER_MESH ||
-                 ctx->stage == MESA_SHADER_TASK));
+                ctx->stage == MESA_SHADER_TASK);
             const bool active_index =
                I->sr == AGX_SR_ACTIVE_THREAD_INDEX_IN_SUBGROUP &&
                subgroup_stage;
