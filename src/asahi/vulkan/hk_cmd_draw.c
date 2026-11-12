@@ -5584,12 +5584,13 @@ hk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
       .pStencilAttachment = &vk_stencil_att,
    };
 
-   if (render->flags & VK_RENDERING_SUSPENDING_BIT)
+   const bool suspending = render->flags & VK_RENDERING_SUSPENDING_BIT;
+   if (suspending)
       need_resolve = false;
 
    memset(render, 0, sizeof(*render));
 
-   hk_sync_end_rendering(cmd);
+   hk_sync_end_rendering(cmd, suspending);
 
    /* Classic upstream submits each render after its predecessor. In
     * particular, coherent advanced blending in a later render pass must
