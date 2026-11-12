@@ -13,6 +13,7 @@
 #include "asahi/compiler/agx_debug.h"
 #include "asahi/compiler/agx3_compute_program.h"
 #include "asahi/compiler/agx3_graphics_program.h"
+#include "asahi/vulkan/hk_g17p_patch.h"
 #include "asahi/compiler/agx3_transcode.h"
 #include "asahi/compiler/agx_nir.h"
 #include "asahi/genxml/agx_pack.h"
@@ -6903,6 +6904,137 @@ agx_build_agx3_graphics_program(struct agx_batch *batch,
 #undef AGX3_PROGRAM_REFUSE
 
 
+/* M5-family native program cache. Composing a G17G Ioto program costs tens of
+ * microseconds of CPU, and Gallium needs one per stage per draw because the
+ * uniform tables it names are uploaded per draw: on the M5 Pro that composer
+ * took 86% of Minecraft's GL CPU time (~1,800 draws per frame). Honeykrisp
+ * keeps the composed bytes per linked shader and patches only the range
+ * addresses (hk_g17p_gfx_loader_create()); do the same. The template is
+ * composed in the address-independent form (every range loads its own base
+ * with full-width LDIMMs), so one template fits every address the draw's
+ * tables get, and only the shape (imageblock, range starts and sizes) keys it.
+ * The bytes don't depend on the program's own address (no constant program),
+ * which Honeykrisp relies on as well; ASAHI_M5_VERIFY_PROGRAM_CACHE=1 checks
+ * every patched program against a fresh composition. */
+struct agx_m5_graphics_template {
+   struct agx_m5_graphics_template *next;
+   struct agx_ioto_g17p_imageblock imageblock;
+   uint16_t range_start[HK_G17P_PATCH_MAX_RANGES];
+   uint16_t range_size[HK_G17P_PATCH_MAX_RANGES];
+   uint8_t range_count;
+   uint16_t length;
+   struct hk_g17p_patch_plan plan;
+   uint8_t bytes[];
+};
+
+#define AGX_M5_GRAPHICS_TEMPLATE_LIMIT 8u
+
+static simple_mtx_t agx_m5_template_lock = SIMPLE_MTX_INITIALIZER;
+
+static bool
+agx_m5_graphics_template_matches(const struct agx_m5_graphics_template *t,
+                                 const struct agx3_g17p_graphics_program_desc *d)
+{
+   if (t->range_count != d->uniform_range_count ||
+       t->imageblock.sample_size_B != d->imageblock.sample_size_B ||
+       t->imageblock.nr_samples != d->imageblock.nr_samples ||
+       t->imageblock.tile_size_px != d->imageblock.tile_size_px)
+      return false;
+   for (unsigned i = 0; i < t->range_count; ++i) {
+      if (t->range_start[i] != d->uniform_ranges[i].start_halfs ||
+          t->range_size[i] != d->uniform_ranges[i].size_halfs)
+         return false;
+   }
+   return hk_g17p_patch_plan_fits(&t->plan, d->uniform_ranges);
+}
+
+static void
+agx_m5_graphics_template_emit(const struct agx_m5_graphics_template *t,
+                              const struct agx3_g17p_graphics_program_desc *desc,
+                              struct agx3_g17p_graphics_program *program)
+{
+   program->length = t->length;
+   memcpy(program->bytes, t->bytes, t->length);
+   hk_g17p_patch_plan_apply(&t->plan, desc->uniform_ranges, program->bytes);
+}
+
+/* Write the program for desc (whose program_va isn't needed) from the linked
+ * shader's template for its shape, composing the template on first use.
+ * False when the shape can't be patched: the caller then composes in full.
+ * Everything in the descriptor but the shape is the linked shader's own. */
+static bool
+agx_m5_graphics_program_cached(struct agx_device *dev,
+                               struct agx_linked_shader *linked,
+                               const struct agx3_g17p_graphics_program_desc *desc,
+                               struct agx3_g17p_graphics_program *program)
+{
+   if (!agx_chip_g17_m5(dev->chip) ||
+       desc->uniform_range_count > HK_G17P_PATCH_MAX_RANGES ||
+       agx_env_flag(AGX_ENV_NO_M5_PROGRAM_CACHE))
+      return false;
+
+   simple_mtx_lock(&agx_m5_template_lock);
+   struct agx_m5_graphics_template **slot = &linked->m5_graphics_templates;
+   unsigned count = 0;
+   while (*slot) {
+      struct agx_m5_graphics_template *t = *slot;
+      if (agx_m5_graphics_template_matches(t, desc)) {
+         *slot = t->next;
+         t->next = linked->m5_graphics_templates;
+         linked->m5_graphics_templates = t;
+         agx_m5_graphics_template_emit(t, desc, program);
+         simple_mtx_unlock(&agx_m5_template_lock);
+         return true;
+      }
+      slot = &t->next;
+      ++count;
+   }
+
+   struct agx_m5_graphics_template *created = NULL;
+   struct agx3_g17p_graphics_program_template *composed =
+      malloc(sizeof(*composed));
+   struct agx3_g17p_graphics_program_desc d = *desc;
+   d.program_va = dev->shader_base + 0x10000;
+   d.patchable = true;
+   if (composed &&
+       agx3_g17g_graphics_program_template_generate(dev->chip, &d, composed)) {
+      created = rzalloc_size(linked, sizeof(*created) +
+                                        composed->program.length);
+      if (created &&
+          hk_g17p_patch_plan_init(&created->plan, d.uniform_ranges,
+                                  d.uniform_range_count, composed->relocations,
+                                  composed->relocation_count,
+                                  composed->program.length, true)) {
+         created->imageblock = d.imageblock;
+         created->range_count = d.uniform_range_count;
+         for (unsigned i = 0; i < created->range_count; ++i) {
+            created->range_start[i] = d.uniform_ranges[i].start_halfs;
+            created->range_size[i] = d.uniform_ranges[i].size_halfs;
+         }
+         created->length = composed->program.length;
+         memcpy(created->bytes, composed->program.bytes, created->length);
+
+         /* Bound memory and lookup cost: the coldest entry is evicted. */
+         if (count == AGX_M5_GRAPHICS_TEMPLATE_LIMIT) {
+            slot = &linked->m5_graphics_templates;
+            while ((*slot)->next)
+               slot = &(*slot)->next;
+            ralloc_free(*slot);
+            *slot = NULL;
+         }
+         created->next = linked->m5_graphics_templates;
+         linked->m5_graphics_templates = created;
+         agx_m5_graphics_template_emit(created, desc, program);
+      } else {
+         ralloc_free(created);
+         created = NULL;
+      }
+   }
+   free(composed);
+   simple_mtx_unlock(&agx_m5_template_lock);
+   return created != NULL;
+}
+
 static uint32_t
 agx_build_native_g17g_graphics_program(struct agx_batch *batch,
                                 struct agx_compiled_shader *cs,
@@ -7060,28 +7192,11 @@ agx_build_native_g17g_graphics_program(struct agx_batch *batch,
       };
    }
 
-   size_t capacity;
-   const bool bounded = agx_chip_g17_m5(dev->chip)
-      ? agx3_g17g_graphics_program_bound(dev->chip, ranges, count, &capacity)
-      : agx3_g17p_graphics_program_bound(dev->chip, ranges, count, &capacity);
-   if (!bounded)
-      AGX3_PROGRAM_REFUSE("program size bound");
-
-   struct agx_bo *program_bo = NULL;
-   struct agx_ptr t = agx_pool_alloc_aligned_with_bo(
-      &batch->pipeline_pool, capacity, AGX_IOTO_PROGRAM_ALIGNMENT,
-      &program_bo);
-   if (!t.cpu || !program_bo || !agx_va_in_usc_window(dev, t.gpu) ||
-       !agx_va_in_usc_window(dev,
-                            linked->bo->va->addr + linked->entry_offset))
-      AGX3_PROGRAM_REFUSE("program allocation");
-
    const uint32_t pass_type =
       cs->stage == MESA_SHADER_FRAGMENT
          ? linked->fragment_control.opaque[0] >> 29
          : AGX_PASS_TYPE_OPAQUE;
-   const struct agx3_g17p_graphics_program_desc desc = {
-      .program_va = t.gpu,
+   struct agx3_g17p_graphics_program_desc desc = {
       .shader_va = linked->bo->va->addr + linked->entry_offset,
       .uniform_ranges = ranges,
       .uniform_range_count = count,
@@ -7100,10 +7215,52 @@ agx_build_native_g17g_graphics_program(struct agx_batch *batch,
          .tile_size_px = batch->tilebuffer_layout.tile_size,
       },
    };
+
    struct agx3_g17p_graphics_program program;
-   const bool generated = agx_chip_g17_m5(dev->chip)
-      ? agx3_g17g_graphics_program_generate(dev->chip, &desc, &program)
-      : agx3_g17p_graphics_program_generate(dev->chip, &desc, &program);
+   const bool cached =
+      agx_m5_graphics_program_cached(dev, linked, &desc, &program);
+   size_t capacity;
+   if (cached) {
+      capacity = program.length;
+   } else {
+      const bool bounded = agx_chip_g17_m5(dev->chip)
+         ? agx3_g17g_graphics_program_bound(dev->chip, ranges, count, &capacity)
+         : agx3_g17p_graphics_program_bound(dev->chip, ranges, count, &capacity);
+      if (!bounded)
+         AGX3_PROGRAM_REFUSE("program size bound");
+   }
+
+   struct agx_bo *program_bo = NULL;
+   struct agx_ptr t = agx_pool_alloc_aligned_with_bo(
+      &batch->pipeline_pool, capacity, AGX_IOTO_PROGRAM_ALIGNMENT,
+      &program_bo);
+   if (!t.cpu || !program_bo || !agx_va_in_usc_window(dev, t.gpu) ||
+       !agx_va_in_usc_window(dev,
+                            linked->bo->va->addr + linked->entry_offset))
+      AGX3_PROGRAM_REFUSE("program allocation");
+   desc.program_va = t.gpu;
+
+   if (cached && agx_env_flag(AGX_ENV_M5_VERIFY_PROGRAM_CACHE)) {
+      struct agx3_g17p_graphics_program fresh;
+      desc.patchable = true;
+      const bool same =
+         agx3_g17g_graphics_program_generate(dev->chip, &desc, &fresh) &&
+         fresh.length == program.length &&
+         !memcmp(fresh.bytes, program.bytes, program.length);
+      desc.patchable = false;
+      static unsigned checked, differed;
+      ++checked;
+      if (!same && differed++ < 8)
+         fprintf(stderr, "M5_PROGRAM_CACHE differs from a fresh composition "
+                         "(stage %u, %zu ranges)\n", stage, count);
+      if (!(checked & (checked - 1)))
+         fprintf(stderr, "M5_PROGRAM_CACHE verified %u programs, %u differed\n",
+                 checked, differed);
+   }
+   const bool generated = cached ||
+      (agx_chip_g17_m5(dev->chip)
+          ? agx3_g17g_graphics_program_generate(dev->chip, &desc, &program)
+          : agx3_g17p_graphics_program_generate(dev->chip, &desc, &program));
    if (!generated || program.length > capacity) {
       if (dev->debug & AGX_DBG_FAULTTRACE) {
          fprintf(stderr,

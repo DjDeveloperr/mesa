@@ -18,6 +18,7 @@ extern "C" {
 #endif
 
 struct agx_g17p_graphics_template;
+struct agx_m5_graphics_template;
 
 struct agx_linked_shader {
    /* Mapped executable memory */
@@ -26,6 +27,9 @@ struct agx_linked_shader {
    /* Gallium-owned, bounded Ioto template cache. Entries are ralloc children
     * of this linked shader and contain no live batch allocations. */
    struct agx_g17p_graphics_template *g17p_graphics_templates;
+
+   /* The same for the M5 family's native programs (agx_state.c). */
+   struct agx_m5_graphics_template *m5_graphics_templates;
 
    /* Exact executable byte count. BO allocations are page-rounded, so the
     * BO size is not a safe disassembler bound. */
