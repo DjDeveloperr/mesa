@@ -170,7 +170,7 @@ agx_chip_isa_encoding(enum agx_chip chip)
    case AGX_CHIP_G17C:
       return AGX_ISA_ENCODING_AGX3C;
 
-   /* Apple's "g18g-encodings" table, shared with G18M and G19P. */
+   /* The agx3d encoding table, shared with G18M and G19P. */
    case AGX_CHIP_G18G:
       return AGX_ISA_ENCODING_AGX3D;
 
