@@ -347,9 +347,8 @@ agx_chip_submission_model(enum agx_chip chip)
    case AGX_CHIP_G17C:
       return AGX_SUBMISSION_MODEL_SKSM;
 
-   /* The only channel classes of the 26A428 mac18g kernelcache's
-    * AGX::PI_400::G::A0 accelerator are 3DChannelSKSM, TAChannelSKSM and
-    * CLChannelSKSM; there is no classic queue. */
+   /* On macOS 26A428 the G18G GPU has only SKSM channels, for 3D, TA
+    * and compute work; there is no classic queue. */
    case AGX_CHIP_G18G:
       return AGX_SUBMISSION_MODEL_SKSM;
 

@@ -605,7 +605,7 @@ hk_cdm_flush(struct hk_device *dev, struct hk_cs *cs, bool memory)
       if (dev->dev.chip == AGX_CHIP_G18G)
          return;
 
-      /* Apple's CommandEncodingNext emitter uses flags=5 for its strong
+      /* The AGX3 compute encoding uses flags=5 for its strong
        * post-dispatch cache flush on every grounded G15--G17 identity.  Keep
        * Honeykrisp's deliberately conservative flush-after-every-launch
        * policy, but encode it in the target command-stream ISA. */
@@ -696,7 +696,7 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
       /* `usc` addresses an AGX2 USC block.  AGX3 direct launches instead
        * require a dispatch-local, 64-byte-aligned Ioto program VA.  Reject
        * this legacy entry point until the caller supplies that joined object;
-       * never feed an AGX2 launch to CommandEncodingNext. */
+       * never feed an AGX2 launch to the AGX3 compute encoding. */
       mesa_loge("legacy USC compute launch rejected for %s",
                 agx_chip_name(dev->dev.chip));
       vk_command_buffer_set_error(&cs->cmd->vk,
