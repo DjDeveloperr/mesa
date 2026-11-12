@@ -8189,9 +8189,9 @@ agx_g18_append_compute(struct agx_batch *batch,
                           ? 3
                        : grid.count[1] != 1 || wg.y != 1 ? 2 : 1,
       };
-      /* G18 performEnqueueKernel normalizes the template for a 1D grid.
-       * The raw native append helper does not apply the semantic packer's
-       * bits17..19 mask. Keep bit23 and higher-dimensional launches intact. */
+      /* A G18 launch normalizes the template for a 1D grid. The raw native
+       * append helper does not apply the semantic packer's bits17..19 mask.
+       * Keep bit23 and higher-dimensional launches intact. */
       if (dev->chip == AGX_CHIP_G18G &&
           direct.size[1] < 2 && direct.size[2] < 2)
          g17g_launch.launch_template.word0 &= UINT32_C(0xfff1ffff);
@@ -11583,10 +11583,10 @@ static bool
 agx_g18_viewports_overlap(const struct pipe_viewport_state *viewports,
                           unsigned count)
 {
-   /* Native597 RasterToken::setViewports (0x219547508..0x2195475e4)
-    * sets control bit 0 when any two viewport rectangles overlap. Use
-    * double precision for their endpoints, as the native comparison does.
-    * Negative scales reverse the transform without changing its bounds. */
+   /* Native597: control bit 0 is set when any two viewport rectangles overlap.
+    * Use double precision for their endpoints, which matches the native
+    * results. Negative scales reverse the transform without changing its
+    * bounds. */
    for (unsigned i = 1; i < count; ++i) {
       const double ix = viewports[i].translate[0];
       const double iy = viewports[i].translate[1];
@@ -11638,8 +11638,8 @@ agx_g17g_viewport_scissor_records(struct agx_batch *batch,
       if (maxx > UINT16_MAX || maxy > UINT16_MAX ||
           !agx_ppp_hal300_scissor_record_pack(dev->chip, &scissor_fields, &scissor))
          return false;
-      /* Native597 handleScissorUpdates uploads consecutive 16-byte records
-       * at 0x21963ace8..0x21963ad48, including each viewport's depth range. */
+      /* Native597 uploads consecutive 16-byte scissor records,
+       * including each viewport's depth range. */
       memcpy(scissors + i * AGX_PPP_HAL300_SCISSOR_RECORD_LENGTH,
              scissor.bytes, AGX_PPP_HAL300_SCISSOR_RECORD_LENGTH);
       uint8_t region_clip[AGX_REGION_CLIP_LENGTH];
@@ -11670,8 +11670,8 @@ agx_g17g_viewport_scissor_records(struct agx_batch *batch,
    float bias = bias_active ? rast->base.offset_units * 2.0f : 0.0f;
    if (bias_active && batch->key.zsbuf.texture &&
        agx_resource(batch->key.zsbuf.texture)->layout.format == PIPE_FORMAT_Z16_UNORM) {
-      /* Native G18 handleDepthBiasUpdates (0x21963a8d8..0x21963a8fc)
-       * pairs integer ISP bias with normalized Z16 depth units. */
+      /* Native G18 depth bias pairs integer ISP bias with normalized Z16 depth
+       * units. */
       const float resolution = 1.0f / 65535.0f;
       bias = fmaf(rast->base.offset_units, resolution,
                   copysignf(resolution, rast->base.offset_units));
@@ -12419,10 +12419,9 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
    if (dropped_vertex || dropped_fragment)
       return NULL;
 
-   /* Apple's renderer picks the rasterization-disabled VertexProgramVariant
-    * for a pipeline built with rasterizationEnabled = NO (26A428
-    * AGXMetalG18G VertexProgramVariant::finalize 0x21954f540..6b0, selected
-    * at 0x219634e14..e2c). */
+   /* A pipeline built with Metal's rasterizationEnabled = NO uses the
+    * rasterization-disabled vertex program variant; native G18 does the
+    * same. */
    const struct agx_vdm_state_update_draw_info draw_info = {
       .source_layout = AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT,
       .draw_path = AGX_VDM_STATE_UPDATE_DRAW_DIRECT_NONINDEXED,
