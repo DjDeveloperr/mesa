@@ -2640,7 +2640,8 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
                               struct agx3_staging_banks *banks,
                               uint16_t bank_floor, uint16_t *outstanding,
                               uint8_t *write_slot,
-                              uint16_t heap_uniform_base)
+                              uint16_t heap_uniform_base,
+                              bool state0_pair)
 {
    const bool m5 = enc == AGX_ISA_ENCODING_AGX3C;
    const unsigned slots = m5 ? 8 : 6;
@@ -2867,8 +2868,15 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
    } else {
       const uint16_t base = heap_uniform_base + (d.image_value == 1 ? 4 : 0);
       const uint8_t staging_slot = d.image_value == 0 ? 1 : 2;
+      /* hk's read/write state-0 ABI points state 0 at the texture/PBE pair
+       * (agx_shader_key::g17p_storage_image_pair); record 0 there is the
+       * texture, which as a PBE describes a far larger surface and sends the
+       * stores past the image. Take the PBE as record 1 of the same heap. */
+      struct agx3_image_write_desc resolved = d;
+      if (state0_pair && d.image_value == 0)
+         resolved.image_value = 1;
       encoded = agx3_tex_encode_image_write_2d(
-         enc, &d, base, staging_slot, imgwci, &imgwci_len);
+         enc, &resolved, base, staging_slot, imgwci, &imgwci_len);
    }
    if (!encoded || !agx3_append(&staged, imgwci, imgwci_len) ||
        !agx3_append(emission, staged.data, staged.size)) {
@@ -14804,7 +14812,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                                &staging_banks,
                                                image_write_bank_floor,
                                                &outstanding, &write_slot,
-                                               ctx->key->g17p_texture_uniform_base))
+                                               ctx->key->g17p_texture_uniform_base,
+                                               ctx->key->g17p_storage_image_pair))
                AGX3_REFUSE(I);
             image_write_slots &= outstanding;
             image_write_slots |= 1u << (write_slot - 1);
