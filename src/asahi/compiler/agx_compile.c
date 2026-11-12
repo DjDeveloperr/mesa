@@ -12899,6 +12899,17 @@ agx_compile_function_nir_attempt(nir_shader *nir, nir_function_impl *impl,
    if (agx3_reserve_cube_scratch(ctx))
       agx_validate(ctx, "cube-array scratch");
 
+   /* Interpolation tokens are checked on SSA: RA may move them. */
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2 &&
+       ctx->stage == MESA_SHADER_FRAGMENT &&
+       !agx3_interp_coords_from_itrcoords(ctx)) {
+      agx_set_refusal(ctx, "interpolation token without its ITRCOORDS",
+                      __LINE__);
+      binary->size = initial_binary_size;
+      ralloc_free(ctx);
+      return false;
+   }
+
    /* Record provenance before RA can create stack instructions. */
    const bool imports_only_before_ra = agx3_cprog_spill_provenance(ctx);
    if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
