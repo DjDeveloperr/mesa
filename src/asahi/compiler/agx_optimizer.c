@@ -698,6 +698,17 @@ agx_optimizer_fmov_rev(agx_context *ctx, agx_instr *I, agx_instr *use)
        (I->src[0].abs || I->src[0].neg || I->src[1].abs || I->src[1].neg))
       return false;
 
+   /* M5 (AGX3C): the native projective multiply (persp_mul_agx3, f32mul.ep4)
+    * has no f16-destination form either (agx_compile.c keeps G17G off it for
+    * that reason). A mediump varying narrowed into it made the fragment shader
+    * unencodable on G17S/G17C and the draw was dropped: most of dEQP-GLES3's
+    * shader, blend, depth/stencil and vertex-array cases. Keep the explicit
+    * narrowing move after it. */
+   if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+       I->op == AGX_OPCODE_PERSP_MUL_AGX3 &&
+       I->dest[0].size == AGX_SIZE_32 && use->dest[0].size == AGX_SIZE_16)
+      return false;
+
    /* M5 (AGX3C): the rounding/log/exp funops have no half-destination form
     * over a word source (agx3_alu_unary_m5 refuses it), and rsqrt and the
     * gradients take a single width. Folding the narrowing move into one made
