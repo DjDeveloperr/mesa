@@ -27,7 +27,7 @@ HASH(uint32_t hash, unsigned data)
 static uint32_t
 hash_instr(const void *data)
 {
-   const agx_instr *I = data;
+   agx_instr *I = (agx_instr *)data;
    uint32_t hash = 0;
 
    /* Explicitly skip destinations, except for size and type */
@@ -39,8 +39,15 @@ hash_instr(const void *data)
    /* Hash the source array as-is */
    hash = XXH32(I->src, sizeof(agx_index) * I->nr_srcs, hash);
 
-   /* Hash everything else in the instruction starting from the opcode */
+   /* Hash everything else in the instruction starting from the opcode.
+    * Exclude proof-only metadata (shift_amount_zero_or_16) so identical
+    * shifts still CSE; agx_opt_cse_impl retains the bit on the surviving
+    * instruction. Clear and restore in place instead of hashing a stack
+    * copy, whose struct padding bytes are not guaranteed to be copied. */
+   const bool saved_shift_tag = I->shift_amount_zero_or_16;
+   I->shift_amount_zero_or_16 = false;
    hash = XXH32(&I->op, sizeof(agx_instr) - offsetof(agx_instr, op), hash);
+   I->shift_amount_zero_or_16 = saved_shift_tag;
 
    return hash;
 }
@@ -273,7 +280,7 @@ agx_opt_cse_impl(agx_context *ctx, enum cse_mode mode)
          struct set_entry *entry =
             _mesa_set_search_or_add(instr_set, instr, &found);
          if (found) {
-            const agx_instr *match = entry->key;
+            agx_instr *match = (agx_instr *)entry->key;
             if (require_overlap) {
                bool safe = true;
                agx_foreach_ssa_dest(instr, d) {
@@ -292,6 +299,8 @@ agx_opt_cse_impl(agx_context *ctx, enum cse_mode mode)
                   }
                }
                if (!safe) {
+                  instr->shift_amount_zero_or_16 |=
+                     match->shift_amount_zero_or_16;
                   entry->key = instr;
                   continue;
                }
@@ -305,6 +314,7 @@ agx_opt_cse_impl(agx_context *ctx, enum cse_mode mode)
                   last[a] = MAX2(last[a], last[b]);
                }
             }
+            match->shift_amount_zero_or_16 |= instr->shift_amount_zero_or_16;
             agx_foreach_dest(instr, d) {
                const unsigned dest = instr->dest[d].value;
                replacement[dest] = match->dest[d];

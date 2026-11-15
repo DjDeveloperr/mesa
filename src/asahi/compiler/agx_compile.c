@@ -8712,10 +8712,21 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
             s1 = boundary;
          }
       }
-      return agx_ushr_to(b, dst, s0, s1);
+      agx_instr *I = agx_ushr_to(b, dst, s0, s1);
+      if (sz == 32 && comps == 1 &&
+          agx_nir_shift_amount_zero_or_16(instr->src[1].src.ssa,
+                                          instr->src[1].swizzle[0]))
+         I->shift_amount_zero_or_16 = true;
+      return I;
    }
-   case nir_op_ishr:
-      return agx_asr_to(b, dst, s0, s1);
+   case nir_op_ishr: {
+      agx_instr *I = agx_asr_to(b, dst, s0, s1);
+      if (sz == 32 && comps == 1 &&
+          agx_nir_shift_amount_zero_or_16(instr->src[1].src.ssa,
+                                          instr->src[1].swizzle[0]))
+         I->shift_amount_zero_or_16 = true;
+      return I;
+   }
 
    case nir_op_extr_agx:
       return agx_extr_to(b, dst, s0, s1, s2,
@@ -10485,6 +10496,73 @@ agx_nir_lower_g18_subgroups(nir_shader *nir)
    while (nir_lower_subgroups(nir, &options))
       progress = true;
    return progress;
+}
+
+/* Whether s is 0 or 1 << bit: a lane's choice between the halves of a word,
+ * as 16 * ((lane >> 3) & 1). */
+static bool
+agx_is_zero_or_bit(nir_scalar s, unsigned bit, unsigned depth)
+{
+   s = nir_scalar_chase_movs(s);
+   if (nir_scalar_is_const(s)) {
+      const uint64_t v = nir_scalar_as_uint(s);
+      return v == 0 || v == (UINT64_C(1) << bit);
+   }
+   if (depth > 6 || !nir_scalar_is_alu(s) || s.def->bit_size != 32)
+      return false;
+
+   switch (nir_scalar_alu_op(s)) {
+   case nir_op_iand:
+      for (unsigned i = 0; i < 2; ++i) {
+         nir_scalar m = nir_scalar_chase_alu_src(s, i);
+         if (!nir_scalar_is_const(m))
+            continue;
+         const uint64_t mask = nir_scalar_as_uint(m);
+         if (mask == (UINT64_C(1) << bit))
+            return true;
+         return (mask & (UINT64_C(1) << bit)) &&
+                agx_is_zero_or_bit(nir_scalar_chase_alu_src(s, 1 - i), bit,
+                                   depth + 1);
+      }
+      return false;
+   case nir_op_ishl: {
+      nir_scalar k = nir_scalar_chase_alu_src(s, 1);
+      if (!nir_scalar_is_const(k) || nir_scalar_as_uint(k) > bit)
+         return false;
+      return agx_is_zero_or_bit(nir_scalar_chase_alu_src(s, 0),
+                                bit - nir_scalar_as_uint(k), depth + 1);
+   }
+   case nir_op_imadshl_agx: {
+      /* a * b + (c << k) */
+      nir_scalar a = nir_scalar_chase_alu_src(s, 0);
+      nir_scalar b = nir_scalar_chase_alu_src(s, 1);
+      nir_scalar k = nir_scalar_chase_alu_src(s, 3);
+      if (!((nir_scalar_is_const(a) && nir_scalar_as_uint(a) == 0) ||
+            (nir_scalar_is_const(b) && nir_scalar_as_uint(b) == 0)) ||
+          !nir_scalar_is_const(k) || nir_scalar_as_uint(k) > bit)
+         return false;
+      return agx_is_zero_or_bit(nir_scalar_chase_alu_src(s, 2),
+                                bit - nir_scalar_as_uint(k), depth + 1);
+   }
+   case nir_op_ubitfield_extract: {
+      nir_scalar bits = nir_scalar_chase_alu_src(s, 2);
+      return bit == 0 && nir_scalar_is_const(bits) &&
+             nir_scalar_as_uint(bits) == 1;
+   }
+   case nir_op_b2i32:
+      return bit == 0;
+   default:
+      return false;
+   }
+}
+
+/* Whether a dynamic 32-bit shift amount is provably 0 or 16. Constant amounts
+ * are left to constant folding. */
+bool
+agx_nir_shift_amount_zero_or_16(nir_def *def, unsigned comp)
+{
+   nir_scalar s = nir_scalar_chase_movs(nir_get_scalar(def, comp));
+   return !nir_scalar_is_const(s) && agx_is_zero_or_bit(s, 4, 0);
 }
 
 static void
@@ -13156,8 +13234,11 @@ agx_compile_function_nir_attempt(nir_shader *nir, nir_function_impl *impl,
                          struct util_dynarray *binary,
                          struct agx_shader_info *out, unsigned *offset_out,
                          unsigned ra_budget_cut, bool disable_remat, bool *retry_without_remat,
-                         bool agx3_reg_float_consts)
+                         bool agx3_reg_float_consts, bool opt_select_shifted_half,
+                         bool *did_select_shifted_half)
 {
+   if (did_select_shifted_half)
+      *did_select_shifted_half = false;
    const unsigned initial_binary_size = binary->size;
    const struct agx_shader_info initial_out = *out;
    if (agx_isa_is_agx3(key->dev.encoding) &&
@@ -13540,7 +13621,8 @@ agx_compile_function_nir_attempt(nir_shader *nir, nir_function_impl *impl,
          return agx_compile_function_nir_attempt(
             nir, impl, key, binary, out, offset_out,
             ra_budget_cut ? ra_budget_cut * 2 : 16, disable_remat,
-            retry_without_remat, agx3_reg_float_consts);
+            retry_without_remat, agx3_reg_float_consts,
+            opt_select_shifted_half, did_select_shifted_half);
       }
       agx_set_refusal(ctx, "register allocation found no legal placement",
                       __LINE__);
@@ -13682,6 +13764,16 @@ agx_compile_function_nir_attempt(nir_shader *nir, nir_function_impl *impl,
     * followed by agx_validate(): lowered loops no longer have SSA block form.
     */
    agx3_lower_texture_publications(ctx);
+
+   /* Fold 32-bit shift-by-0-or-16 plus low-half copy into a single 16-bit
+    * select once the post-RA IR matches what the binary packer sees, then
+    * refresh register cache hints alone (without rerunning physical copy
+    * removal after texture-publication lowering) if any fold fired. */
+   if (opt_select_shifted_half && agx_opt_select_shifted_half(ctx)) {
+      agx_compute_register_cache(ctx);
+      if (did_select_shifted_half)
+         *did_select_shifted_half = true;
+   }
 
    if (ctx->is_preamble &&
        agx_isa_is_agx3(ctx->key->dev.encoding) &&
@@ -13903,7 +13995,9 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
                          struct agx_shader_key *key,
                          struct util_dynarray *binary,
                          struct agx_shader_info *out, unsigned *offset_out,
-                         bool agx3_reg_float_consts)
+                         bool agx3_reg_float_consts,
+                         bool opt_select_shifted_half,
+                         bool *did_select_shifted_half)
 {
    const bool eligible =
       impl->function->is_preamble && nir->info.stage == MESA_SHADER_FRAGMENT &&
@@ -13913,7 +14007,9 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    if (!eligible)
       return agx_compile_function_nir_attempt(nir, impl, key, binary, out,
                                              offset_out, 0, false, NULL,
-                                             agx3_reg_float_consts);
+                                             agx3_reg_float_consts,
+                                             opt_select_shifted_half,
+                                             did_select_shifted_half);
 
    /* Preserve all compiler-owned state, including earlier main code/rodata.
     * The first attempt owns a deep NIR clone and a fresh AIR context. */
@@ -13921,7 +14017,9 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    if (!attempt)
       return agx_compile_function_nir_attempt(nir, impl, key, binary, out,
                                              offset_out, 0, false, NULL,
-                                             agx3_reg_float_consts);
+                                             agx3_reg_float_consts,
+                                             opt_select_shifted_half,
+                                             did_select_shifted_half);
 
    nir_function_impl *attempt_impl = NULL;
    nir_foreach_function_with_impl(func, candidate, attempt) {
@@ -13937,7 +14035,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    bool retry = false;
    bool success = agx_compile_function_nir_attempt(
       attempt, attempt_impl, key, binary, out, offset_out, 0, false, &retry,
-      agx3_reg_float_consts);
+      agx3_reg_float_consts, opt_select_shifted_half, did_select_shifted_half);
    ralloc_free(attempt);
    if (!retry)
       return success;
@@ -13949,7 +14047,9 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    /* Exactly one retry. Real full-budget spills retain the old refusal. */
    return agx_compile_function_nir_attempt(nir, impl, key, binary, out,
                                           offset_out, 0, true, NULL,
-                                          agx3_reg_float_consts);
+                                          agx3_reg_float_consts,
+                                          opt_select_shifted_half,
+                                          did_select_shifted_half);
 }
 
 /*
@@ -16359,7 +16459,8 @@ agx_compile_shader_nir_internal(nir_shader *nir, struct agx_shader_key *key,
                                 struct blob *pre_preamble_blob,
                                 bool pre_preamble_optimized,
                                 bool epilog_has_alu,
-                                bool preamble_newly_enabled)
+                                bool preamble_newly_enabled,
+                                bool opt_select_shifted_half)
 {
    /* Specialization or shader linking may gather info again after
     * preprocessing, clearing the operation-derived helper flags. Execution
@@ -16857,8 +16958,26 @@ agx_compile_shader_nir_internal(nir_shader *nir, struct agx_shader_key *key,
       const struct agx_shader_info saved_info = out->info;
       const struct agx_shader_key saved_key = *key;
       const unsigned saved_size = binary.size;
+      bool folded_shifted_half = false;
       bool compiled = agx_compile_function_nir(nir, impl, key, &binary,
-                                               &out->info, &offset, false);
+                                               &out->info, &offset, false,
+                                               opt_select_shifted_half,
+                                               &folded_shifted_half);
+
+      /* Outside AGX3B the shifted-half fold commits without a speculative pack
+       * check. If a packer refuses the folded function, retry without the fold
+       * before giving up on the shader. */
+      if (!compiled && folded_shifted_half) {
+         if (agx_compiler_debug & AGX_DBG_SHADERS)
+            fprintf(stderr,
+                    "AGX3: retrying without shifted-half select fold\n");
+         out->info = saved_info;
+         *key = saved_key;
+         binary.size = saved_size;
+         compiled = agx_compile_function_nir(nir, impl, key, &binary,
+                                             &out->info, &offset, false,
+                                             false, NULL);
+      }
 
       /* The G17G packer refuses shapes it has no grounded encoding for and
        * rolls the binary back. Most refusals in real clients (Skia/ANGLE)
@@ -16870,8 +16989,23 @@ agx_compile_shader_nir_internal(nir_shader *nir, struct agx_shader_key *key,
          out->info = saved_info;
          *key = saved_key;
          binary.size = saved_size;
+         folded_shifted_half = false;
          compiled = agx_compile_function_nir(nir, impl, key, &binary,
-                                             &out->info, &offset, true);
+                                             &out->info, &offset, true,
+                                             opt_select_shifted_half,
+                                             &folded_shifted_half);
+         if (!compiled && folded_shifted_half) {
+            if (agx_compiler_debug & AGX_DBG_SHADERS)
+               fprintf(stderr,
+                       "AGX3: retrying with float constants in registers and "
+                       "without shifted-half select fold\n");
+            out->info = saved_info;
+            *key = saved_key;
+            binary.size = saved_size;
+            compiled = agx_compile_function_nir(nir, impl, key, &binary,
+                                                &out->info, &offset, true,
+                                                false, NULL);
+         }
       }
 
       if (!compiled) {
@@ -16991,7 +17125,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
                        struct agx_shader_part *out)
 {
    return agx_compile_shader_nir_internal(nir, key, out, NULL, false, false,
-                                          false);
+                                          false, true);
 }
 
 bool
@@ -17000,7 +17134,7 @@ agx_compile_shader_nir_capture(nir_shader *nir, struct agx_shader_key *key,
                                struct blob *pre_preamble_blob)
 {
    return agx_compile_shader_nir_internal(nir, key, out, pre_preamble_blob,
-                                          false, false, false);
+                                          false, false, false, true);
 }
 
 bool
@@ -17011,7 +17145,17 @@ agx_compile_shader_nir_preoptimized(nir_shader *nir, struct agx_shader_key *key,
 {
    return agx_compile_shader_nir_internal(nir, key, out, NULL, true,
                                           epilog_has_alu,
-                                          preamble_newly_enabled);
+                                          preamble_newly_enabled, true);
+}
+
+/* Exposed for compiler tests comparing the exact same post-RA input with and
+ * without the shifted-half peephole. */
+bool
+agx_compile_shader_nir_without_select_shifted_half(
+   nir_shader *nir, struct agx_shader_key *key, struct agx_shader_part *out)
+{
+   return agx_compile_shader_nir_internal(nir, key, out, NULL, false, false,
+                                          false, false);
 }
 
 void
