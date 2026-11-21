@@ -308,6 +308,10 @@ struct hk_upload_stats {
    uint64_t draw_param_uploads, draw_param_bytes, draw_param_reuses;
    uint64_t draw_id_uploads, draw_id_bytes, draw_id_reuses;
    uint64_t constant_uploads, constant_bytes, constant_reuses;
+   /* Native bind tails: built in full, given a new fragment program only,
+    * and kept. The last two count a HAL200 stream that takes the fragment
+    * record alone, or nothing, as well. */
+   uint64_t bind_tail_builds, bind_tail_program_rebuilds, bind_tail_reuses;
 };
 
 #define hk_upload_stat(cmd, field, value)                                      \

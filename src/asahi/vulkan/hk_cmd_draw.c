@@ -8558,6 +8558,7 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
       prepared->fragment_program = fragment_program;
       prepared->fragment_dma_set_base = hk_g17p_dma_set_base(cmd, fs);
       prepared->valid = true;
+      hk_upload_stat(cmd, bind_tail_program_rebuilds, 1);
       return true;
    }
    /* The memo describes prepared, which the build below overwrites. */
@@ -9113,6 +9114,7 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
    gfx->g17p_bind_tail_memo.fs = fs;
    gfx->g17p_bind_tail_memo.hw_vs = vs;
    gfx->g17p_bind_tail_memo.valid = true;
+   hk_upload_stat(cmd, bind_tail_builds, 1);
 
    return true;
 }
@@ -9318,8 +9320,10 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        * prepared->fragment_program without re-uploading the FS USC program. */
       if (((known_match && prepared->valid) ||
            hk_g17p_prepared_bind_tail_matches(cmd, prepared)) &&
-          prepared->fragment_program == cs->g17p_bind_tail.fs_program)
+          prepared->fragment_program == cs->g17p_bind_tail.fs_program) {
+         hk_upload_stat(cmd, bind_tail_reuses, 1);
          return true;
+      }
 
       struct hk_shader *fs = hk_bound_fs(cmd);
       struct hk_linked_shader *linked_fs = gfx->linked[MESA_SHADER_FRAGMENT];
@@ -9343,13 +9347,16 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                 fragment_program >= (UINT64_C(1) << 48))
                return hk_g17p_bind_tail_refused(__LINE__);
 
-            if (fragment_program == cs->g17p_bind_tail.fs_program)
+            if (fragment_program == cs->g17p_bind_tail.fs_program) {
+               hk_upload_stat(cmd, bind_tail_reuses, 1);
                return true;
+            }
 
             if (hk_g17p_emit_fs_ppp_update(cmd, cs, out, fragment_program)) {
                /* prepared->tail still points to the earlier bind block's FS
                 * record; force a rebuild if a later stream needs a full tail. */
                prepared->valid = false;
+               hk_upload_stat(cmd, bind_tail_program_rebuilds, 1);
                return true;
             }
          }
@@ -9358,6 +9365,7 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    if ((known_match && prepared->valid) ||
        hk_g17p_prepared_bind_tail_matches(cmd, prepared)) {
+      hk_upload_stat(cmd, bind_tail_reuses, 1);
       if (!hk_g17p_publish_native_bind_tail(cmd, cs, out, prepared))
          return false;
       *tail_emitted = true;
