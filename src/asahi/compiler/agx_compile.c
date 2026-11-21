@@ -15982,13 +15982,8 @@ agx_fs_takes_derivatives(nir_shader *nir)
  * Divergence is an additional refusal; correctness uses the barrier's
  * workgroup execution scope on a valid shader. */
 static bool
-shared_phase_boundary(nir_block *block, bool entry)
+agx_shared_phase_barrier(nir_instr *instr)
 {
-   if (!block || block->divergent)
-      return false;
-
-   nir_instr *instr = entry ? nir_block_last_instr(block)
-                            : nir_block_first_instr(block);
    if (!instr || instr->type != nir_instr_type_intrinsic)
       return false;
 
@@ -15998,6 +15993,15 @@ shared_phase_boundary(nir_block *block, bool entry)
           nir_intrinsic_memory_scope(barrier) == SCOPE_DEVICE &&
           nir_intrinsic_memory_modes(barrier) == nir_var_mem_shared &&
           nir_intrinsic_memory_semantics(barrier) == NIR_MEMORY_ACQ_REL;
+}
+
+
+static bool
+shared_phase_boundary(nir_block *block, bool entry)
+{
+   return block && !block->divergent &&
+          agx_shared_phase_barrier(entry ? nir_block_last_instr(block)
+                                         : nir_block_first_instr(block));
 }
 
 static bool
@@ -16084,6 +16088,74 @@ cse_shared_reads_in_phases(nir_shader *nir)
       any |= nir_progress(progress, impl, nir_metadata_control_flow);
    }
 
+   return any;
+}
+
+static bool
+agx3c_reuse_flat_shared_phase(nir_instr *begin, nir_instr *end)
+{
+   struct set loads = {0};
+   bool progress = false;
+
+   for (nir_instr *instr = nir_instr_next(begin); instr != end;) {
+      nir_instr *next = nir_instr_next(instr);
+      if (instr->type == nir_instr_type_intrinsic) {
+         if (!loads.table)
+            nir_instr_set_init(&loads, NULL);
+         if (nir_instr_set_add_or_rewrite(&loads, instr,
+                                          shared_phase_load, NULL, NULL)) {
+            nir_instr_remove(instr);
+            progress = true;
+         }
+      }
+      instr = next;
+   }
+   if (loads.table)
+      nir_instr_set_fini(&loads);
+   return progress;
+}
+
+
+static bool
+agx3c_cse_flat_shared_phases(nir_block *block)
+{
+   if (block->divergent)
+      return false;
+
+   bool progress = false;
+   nir_instr *begin = NULL;
+   nir_foreach_instr(instr, block) {
+      if (agx_shared_phase_barrier(instr)) {
+         if (begin)
+            progress |= agx3c_reuse_flat_shared_phase(begin, instr);
+         begin = instr;
+      } else if (begin && instr->type != nir_instr_type_alu &&
+                 instr->type != nir_instr_type_load_const &&
+                 (instr->type != nir_instr_type_intrinsic ||
+                  !shared_phase_load(nir_instr_as_intrinsic(instr), NULL))) {
+         begin = NULL;
+      }
+   }
+   return progress;
+}
+
+
+static bool
+agx3c_cse_flat_shared_reads(nir_shader *nir)
+{
+   bool any = false;
+   nir_divergence_analysis(nir);
+   nir_foreach_function_impl(impl, nir) {
+      if (impl->function->is_preamble) {
+         nir_no_progress(impl);
+         continue;
+      }
+
+      bool progress = false;
+      nir_foreach_block(block, impl)
+         progress |= agx3c_cse_flat_shared_phases(block);
+      any |= nir_progress(progress, impl, nir_metadata_control_flow);
+   }
    return any;
 }
 
@@ -16529,6 +16601,12 @@ agx_compile_shader_nir_once(nir_shader *nir, struct agx_shader_key *key,
          NIR_PASS(_, nir, nir_shader_intrinsics_pass, fold_w8_word_unpack,
                   nir_metadata_control_flow, NULL);
    }
+
+   if (key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+       !key->dev.emit_agx3d &&
+       nir->info.stage == MESA_SHADER_COMPUTE && !nir->info.internal &&
+       nir->info.shared_size && !key->secondary)
+      NIR_PASS(_, nir, agx3c_cse_flat_shared_reads);
 
    /* A workgroup of one subgroup needs only SIMD-group fences. (Runs after
     * any pass that delimits shared-memory phases by workgroup barriers.) */
