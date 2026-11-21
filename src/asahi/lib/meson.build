@@ -605,6 +605,26 @@ if with_tests
   )
 
   test(
+    'asahi-hal200-records',
+    executable(
+      'asahi-hal200-records',
+      files(
+        'agx_ppp_hal200_graphics_core.c',
+        'agx_ppp_hal200_raster_core.c',
+        'agx_ppp_viewport_payload_core.c',
+        'agx_ppp_w_clamp_cull2_core.c',
+        'agx_vdm_hal200_bind_tail_core.c',
+        'agx_vdm_hal200_direct_draw_core.c',
+        'agx_vdm_index_list_core.c',
+        'agx_vdm_state_core.c',
+        'tests/test-hal200-records.c',
+      ),
+      include_directories : [inc_include, inc_src, inc_asahi],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'asahi-pbe-agx3-core',
     executable(
       'asahi-pbe-agx3-core',
