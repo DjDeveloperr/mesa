@@ -28,6 +28,7 @@
 #include "agx_nir_texture.h"
 #include "agx_debug.h"
 #include "agx_nir.h"
+#include "agx_nir_match_gemm.h"
 #include "agx3_matrix_core.h"
 #include "agx_opcodes.h"
 #include "agx3_pack.h"
@@ -16600,6 +16601,19 @@ agx_compile_shader_nir_once(nir_shader *nir, struct agx_shader_key *key,
       if (key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
          NIR_PASS(_, nir, nir_shader_intrinsics_pass, fold_w8_word_unpack,
                   nir_metadata_control_flow, NULL);
+   }
+
+   if (key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+       !key->dev.emit_agx3d &&
+       nir->info.stage == MESA_SHADER_COMPUTE && !nir->info.internal &&
+       !key->secondary) {
+      /* Match 32x32 FP32 shared-memory GEMM tiles whose K-chain ffmads carry
+       * no float-math-control bits (no NoContraction, no FPFastMathMode
+       * lacking AllowReassoc/AllowContract, and no float-controls execution
+       * mode) and lower them to AGX3C f32matmad8x8 matrix operations. */
+      struct agx_gemm_match gemm;
+      if (agx_nir_match_gemm(nir, &gemm))
+         NIR_PASS(_, nir, agx_nir_lower_gemm, &gemm);
    }
 
    if (key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
