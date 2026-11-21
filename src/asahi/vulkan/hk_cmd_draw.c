@@ -119,7 +119,7 @@ static void hk_init_tess_params(struct hk_cmd_buffer *cmd,
                                 struct poly_tess_params *out);
 static void hk_flush_dynamic_state(
    struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint32_t draw_id,
-   struct agx_draw draw, bool ordinary_draw_path,
+   const struct agx_draw *draw, bool ordinary_draw_path,
    bool *g17p_native_bind_tail_emitted_out);
 
 /* CTS coverage of indirect draws is pretty bad, so it's helpful to be able to
@@ -10983,13 +10983,13 @@ hk_prelink_vertex(struct hk_device *dev, struct hk_api_shader *vs_api,
  * draw in the same stream latched?
  *
  * This is the exact condition hk_flush_dynamic_state() uses to decide whether
- * it writes anything at all, hoisted so the split policy and the emitter
+ * it writes anything at all, shared so the split policy and the emitter
  * cannot drift apart.  It must be called at the point where every producer of
  * dirtiness -- the passthrough-GS bind, hk_flush_shaders(), the push-descriptor
  * flush -- has already run, otherwise it answers for a different draw than the
  * one that gets recorded.
  */
-static bool
+static inline bool
 hk_gfx_republishes_render_state(struct hk_cmd_buffer *cmd)
 {
    struct hk_graphics_state *gfx = &cmd->state.gfx;
@@ -11266,8 +11266,8 @@ hk_flush_draw_params_and_id(struct hk_cmd_buffer *cmd,
 
 static __attribute__((noinline)) void
 hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
-                            uint32_t draw_id, struct agx_draw draw,
-                            bool ordinary_draw_path,
+                            uint32_t draw_id, const struct agx_draw *draw,
+                            bool ordinary_draw_path, bool republishes,
                             bool *g17p_native_bind_tail_emitted_out)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
@@ -11294,7 +11294,7 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       return;
    }
 
-   if (!hk_gfx_republishes_render_state(cmd))
+   if (!republishes)
       return;
    if (unlikely(dev->frame_anatomy))
       cs->anatomy_republish++;
@@ -11436,15 +11436,15 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    const bool sw_index_size_changed =
       (linked_prolog->adjacency || !linked_prolog->hw) &&
       linked_prolog->sw_index_size_B !=
-         (draw.indexed ? agx_index_size_to_B(draw.index_size) : 0);
+         (draw->indexed ? agx_index_size_to_B(draw->index_size) : 0);
 
    if (!native_mesh && (IS_DIRTY(VI) || IS_DIRTY(VI_BINDINGS_VALID) ||
         IS_DIRTY(VI_BINDING_STRIDES) || IS_DIRTY(IA_PRIMITIVE_TOPOLOGY) ||
         vgt_dirty || !gfx->fast_link_vs.valid || sw_index_size_changed ||
         hk_fast_link_vs_uvs_stale(cmd, sw_vs))) {
       struct hk_fast_link_key_vs key;
-      hk_fill_fast_link_key_vs(cmd, sw_vs, hw_vs, draw.indexed,
-                               draw.index_size, draw.restart, &key);
+      hk_fill_fast_link_key_vs(cmd, sw_vs, hw_vs, draw->indexed,
+                               draw->index_size, draw->restart, &key);
 
       if (!hk_update_fast_linked(cmd, sw_vs, &key)) {
          cs->current = out;
@@ -11502,7 +11502,7 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    gfx->render.color_read |= gfx->fast_link_fs.reads_tib;
 
    hk_flush_draw_params_and_id(cmd, sw_vs, gfx->linked[MESA_SHADER_VERTEX],
-                               draw_id, draw);
+                               draw_id, *draw);
 
    bool topology_changed = false;
    if (IS_DIRTY(IA_PRIMITIVE_TOPOLOGY) || gt_dirty || vgt_dirty || IS_SHADER_DIRTY(MESH)) {
@@ -11651,7 +11651,7 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        (gfx->shaders[MESA_SHADER_TESS_EVAL] ||
         gfx->shaders[MESA_SHADER_GEOMETRY] || linked_vs->sw_indexing)) {
       const uint64_t old_outputs = desc->root.draw.vertex_outputs;
-      const uint64_t vertex_params = hk_upload_vertex_params(cmd, draw);
+      const uint64_t vertex_params = hk_upload_vertex_params(cmd, *draw);
       if (desc->root.draw.vertex_params != vertex_params ||
           desc->root.draw.vertex_outputs != old_outputs) {
          desc->root.draw.vertex_params = vertex_params;
@@ -11669,7 +11669,7 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    }
 
    if (gfx->shaders[MESA_SHADER_GEOMETRY]) {
-      const uint64_t geometry_params = hk_upload_geometry_params(cmd, draw);
+      const uint64_t geometry_params = hk_upload_geometry_params(cmd, *draw);
       if (gfx->descriptors.root.draw.geometry_params != geometry_params) {
          gfx->descriptors.root.draw.geometry_params = geometry_params;
          gfx->descriptors.root_dirty = true;
@@ -11696,7 +11696,7 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     * storage before root publication and fill it only after publication. */
    if (tess_args.cpu) {
       assert(gfx->root);
-      hk_upload_tess_params(cmd, tess_args.cpu, draw);
+      hk_upload_tess_params(cmd, tess_args.cpu, *draw);
    }
 
    /* Hardware dynamic state must be deferred until after the root and fast
@@ -11862,7 +11862,7 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       case AGX_CS_GENERATION_HAL300: {
          bool tail_emitted = false;
          if (!hk_agx3_publish_vertex_state(
-                cmd, cs, &out, hw_vs, pipeline_program, draw,
+                cmd, cs, &out, hw_vs, pipeline_program, *draw,
                 ordinary_draw_path,
                 prepared_varyings && gfx->root == prepared_varyings_root,
                 &tail_emitted))
@@ -12098,19 +12098,29 @@ hk_g17p_flush_dynamic_state_fast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    return true;
 }
 
+/* A draw that republishes nothing has nothing to flush, and is most draws.
+ * It leaves from here, so that it pays neither for the checks of the HAL200
+ * fast flush nor for the size of hk_flush_dynamic_state_slow() on the way in
+ * and out. That function refuses a transformed draw the AGX3 paths cannot
+ * take whether or not it republishes, so such a draw still goes there. */
 static __attribute__((hot)) void
 hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
-                       uint32_t draw_id, struct agx_draw draw,
+                       uint32_t draw_id, const struct agx_draw *draw,
                        bool ordinary_draw_path,
                        bool *g17p_native_bind_tail_emitted_out)
 {
-   if (hk_g17p_flush_dynamic_state_fast(cmd, cs, draw_id, draw,
+   const bool republishes = hk_gfx_republishes_render_state(cmd);
+
+   if (!republishes && ordinary_draw_path)
+      return;
+
+   if (hk_g17p_flush_dynamic_state_fast(cmd, cs, draw_id, *draw,
                                         ordinary_draw_path,
                                         g17p_native_bind_tail_emitted_out))
       return;
 
    hk_flush_dynamic_state_slow(
-      cmd, cs, draw_id, draw, ordinary_draw_path,
+      cmd, cs, draw_id, draw, ordinary_draw_path, republishes,
       g17p_native_bind_tail_emitted_out);
 }
 
@@ -12579,7 +12589,6 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
     * the last point at which nothing of this draw has been written to the
     * stream yet.  Both halves are required: the republication is the hazard,
     * and a split has to happen before the record it protects. */
-   const bool republishes = hk_gfx_republishes_render_state(cmd);
 
    /* The HAL200 draw-state selector holds 16-bit scissor and
     * depth-bias indices. A stream whose arrays are about to exceed that
@@ -12591,7 +12600,8 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       (cs->scissor.size / AGX_SCISSOR_LENGTH + ppp_margin > UINT16_MAX ||
        cs->depth_bias.size / AGX_DEPTH_BIAS_LENGTH + ppp_margin > UINT16_MAX);
 
-   if (republishes && cs->stats.cmds > 0 && ppp_index_limit) {
+   if (cs->stats.cmds > 0 && ppp_index_limit &&
+       hk_gfx_republishes_render_state(cmd)) {
       hk_cmd_buffer_end_graphics(cmd);
       cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
       if (!cs)
@@ -12605,7 +12615,7 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       hk_ensure_cs_has_space(cmd, cs, HK_GFX_DRAW_RESERVATION);
    }
 
-   hk_flush_dynamic_state(cmd, cs, draw_id, *draw,
+   hk_flush_dynamic_state(cmd, cs, draw_id, draw,
                           ordinary_draw_path || g17p_transformed_path,
                           g17p_native_bind_tail_emitted);
    cmd->state.gfx.render.barrier_shader_writes |=
