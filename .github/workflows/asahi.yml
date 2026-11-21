@@ -46,6 +46,18 @@ jobs:
       - name: Build
         run: meson compile -C build
 
+      - name: EGL diagnostics (train debug)
+        run: |
+          rpm -qa | grep -i -E 'glvnd|mesa-libEGL' || true
+          ls -l /usr/lib64/libEGL* /usr/lib64/libGLdispatch* 2>&1 || true
+          ls -l build/src/egl/ 2>&1 | head -30 || true
+          cat build/src/egl/devenv_glvnd_egl.json 2>&1 || true
+          python3 -c 'import ctypes,ctypes.util; print("find_library EGL:", ctypes.util.find_library("EGL"))
+          try:
+              ctypes.CDLL("libEGL.so.1"); print("libEGL.so.1 loads")
+          except OSError as e: print("dlopen libEGL.so.1 failed:", e)' || true
+          grep -i -E 'glvnd|with_egl|egl' build/meson-logs/meson-log.txt | grep -i -E 'glvnd|found' | head -10 || true
+
       - name: Test
         run: meson test -C build --suite asahi --suite poly --num-processes "$(nproc)" --print-errorlogs
 
