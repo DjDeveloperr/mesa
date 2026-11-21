@@ -2496,14 +2496,14 @@ hk_pack_attachment_limit(const struct hk_device *dev)
 /* Streams with global atomics are packed only where no other kernel queue
  * of the device can run beside the packet. On M5, two kernel queues
  * running packed atomic chains on the same memory lost contributions (root
- * cause unknown), so such streams stay separate commands unless
- * ASAHI_M5_PACK_ATOMICS=1 (or HK_PACK_ATOMICS=1) and the device has a
- * single kernel queue, which runs its commands in order. A second kernel
- * queue created while a packet runs is not covered; unpacked atomic work
- * has the same exposure. The G16 kernel puts every compute command of a VM
- * on its one firmware compute queue and never runs one beside another VM's:
- * several commands of one VM may be in flight there, but the firmware runs
- * them one after another, never beside a packet. G16G packs them unless
+ * cause unknown), so packing is allowed by default only when the device has
+ * a single kernel queue (which runs its commands in order) and disabled
+ * whenever multiple kernel queues exist or HK_PACK_ATOMICS=0. A second
+ * kernel queue created while a packet runs is not covered; unpacked atomic
+ * work has the same exposure. The G16 kernel puts every compute command of
+ * a VM on its one firmware compute queue and never runs one beside another
+ * VM's: several commands of one VM may be in flight there, but the firmware
+ * runs them one after another, never beside a packet. G16G packs them unless
  * HK_PACK_ATOMICS=0. That is a property of the G16 kernel, the only one for
  * G16G, which no uAPI feature reports yet; the chip stands for it until one
  * does (hk_pack_atomics_choice()). */

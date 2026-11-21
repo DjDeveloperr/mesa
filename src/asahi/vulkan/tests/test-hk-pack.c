@@ -265,7 +265,9 @@ static void
 plan_queue(const struct hk_queue *q, struct hk_cmd_buffer **cmds, unsigned n,
            bool atomics, struct hk_pack_run *runs, unsigned *count)
 {
-   struct hk_pack_member members[16];
+   struct hk_pack_member members[64];
+   if (n > ARRAY_SIZE(members))
+      abort();
    hk_pack_describe_submit(members, device(), &q->sync, cmds, n, terminate,
                            atomics);
    const struct hk_pack_limits limits = {.max_attachments = 16,
@@ -319,11 +321,20 @@ runs_are(const struct hk_pack_run *runs, unsigned count, unsigned expected,
 }
 
 static struct hk_cmd_buffer *
+looping_work(unsigned dispatches, uint64_t work)
+{
+   struct hk_cmd_buffer *c = plain(dispatches);
+   struct hk_cs *s = list_first_entry(&c->control_streams, struct hk_cs, node);
+   s->pack_static_work = work;
+   s->pack_loop_dispatches = dispatches;
+   s->pack_loop_static_work = work;
+   return c;
+}
+
+static struct hk_cmd_buffer *
 looping(void)
 {
-   struct hk_cmd_buffer *c = plain(1);
-   list_first_entry(&c->control_streams, struct hk_cs, node)->pack_loops = true;
-   return c;
+   return looping_work(1, 64ull * 16);
 }
 
 /* A member waiting for render work: a GFX -> COMPUTE barrier before it. */
@@ -349,13 +360,76 @@ test_plan(void)
 
    struct hk_cmd_buffer *loops2[] = {looping(), looping()};
    plan(loops2, 2, runs, &count);
-   T("two looping members stay apart", count == 0);
+   T("small looping members within budget pack together",
+     runs_are(runs, count, 1, (unsigned[]){0}, (unsigned[]){2}));
 
    struct hk_cmd_buffer *loops_mixed[] = {plain(1), looping(), looping(),
                                           plain(1)};
    plan(loops_mixed, 4, runs, &count);
-   T("a packet holds at most one looping member",
-     runs_are(runs, count, 2, (unsigned[]){0, 2}, (unsigned[]){2, 2}));
+   T("plain and small looping members pack into one packet",
+     runs_are(runs, count, 1, (unsigned[]){0}, (unsigned[]){4}));
+
+   struct hk_cmd_buffer *loops_cap[HK_PACK_MAX_LOOP_DISPATCHES + 1];
+   for (unsigned i = 0; i < ARRAY_SIZE(loops_cap); ++i)
+      loops_cap[i] = looping();
+   plan(loops_cap, HK_PACK_MAX_LOOP_DISPATCHES, runs, &count);
+   T("exact looping dispatch budget forms one packet",
+     runs_are(runs, count, 1, (unsigned[]){0},
+              (unsigned[]){HK_PACK_MAX_LOOP_DISPATCHES}));
+   plan(loops_cap, ARRAY_SIZE(loops_cap), runs, &count);
+   T("exceeding looping dispatch budget splits cleanly",
+     runs_are(runs, count, 1, (unsigned[]){0},
+              (unsigned[]){HK_PACK_MAX_LOOP_DISPATCHES}));
+
+   struct hk_cmd_buffer *loops_two_runs[HK_PACK_MAX_LOOP_DISPATCHES * 2];
+   for (unsigned i = 0; i < ARRAY_SIZE(loops_two_runs); ++i)
+      loops_two_runs[i] = looping();
+   plan(loops_two_runs, ARRAY_SIZE(loops_two_runs), runs, &count);
+   T("two full looping dispatch budgets form two packets",
+     runs_are(runs, count, 2,
+              (unsigned[]){0, HK_PACK_MAX_LOOP_DISPATCHES},
+              (unsigned[]){HK_PACK_MAX_LOOP_DISPATCHES,
+                           HK_PACK_MAX_LOOP_DISPATCHES}));
+
+   const uint64_t half_loop_budget = HK_PACK_MAX_LOOP_STATIC_WORK / 2;
+   struct hk_cmd_buffer *loop_work_exact[] = {
+      looping_work(1, half_loop_budget),
+      looping_work(1, HK_PACK_MAX_LOOP_STATIC_WORK - half_loop_budget),
+   };
+   plan(loop_work_exact, 2, runs, &count);
+   T("looping static work equal to budget packs together",
+     runs_are(runs, count, 1, (unsigned[]){0}, (unsigned[]){2}));
+
+   struct hk_cmd_buffer *loop_work_over[] = {
+      looping_work(1, half_loop_budget),
+      looping_work(1, HK_PACK_MAX_LOOP_STATIC_WORK - half_loop_budget + 1),
+   };
+   plan(loop_work_over, 2, runs, &count);
+   T("looping static work over budget splits", count == 0);
+
+   struct hk_cmd_buffer *huge_loop_plain[] = {
+      plain(1),
+      looping_work(1, HK_PACK_MAX_LOOP_STATIC_WORK + 1),
+      plain(1),
+   };
+   plan(huge_loop_plain, 3, runs, &count);
+   T("one oversized looping member still packs with straight-line members",
+     runs_are(runs, count, 1, (unsigned[]){0}, (unsigned[]){3}));
+
+   struct hk_cmd_buffer *huge_loop_split[] = {
+      plain(1),
+      looping_work(1, HK_PACK_MAX_LOOP_STATIC_WORK + 1),
+      looping(),
+   };
+   plan(huge_loop_split, 3, runs, &count);
+   T("an oversized looping member splits before another looping member",
+     runs_are(runs, count, 1, (unsigned[]){0}, (unsigned[]){2}));
+
+   struct hk_cmd_buffer *loop_after_render[] = {looping(), after_render(),
+                                                looping()};
+   plan_on(loop_after_render, 3, HK_SYNC_GFX, false, runs, &count);
+   T("looping members still split on a new render wait",
+     runs_are(runs, count, 1, (unsigned[]){1}, (unsigned[]){2}));
 
    struct hk_cmd_buffer *later_render[] = {plain(1), after_render()};
    plan_on(later_render, 2, HK_SYNC_GFX, false, runs, &count);
@@ -558,8 +632,10 @@ test_boundary(void)
 }
 
 /* HK_PACK_ATOMICS: on by default where the kernel runs a VM's compute
- * commands one after another (G16G), opt-in elsewhere with one kernel queue;
- * an unparsable value keeps the default. */
+ * commands one after another (G16G) or when the device has at most one
+ * kernel compute queue (`queues <= 1`); disabled when multiple kernel
+ * queues exist (`queues > 1`), even with HK_PACK_ATOMICS=1; an unparsable
+ * value keeps the default. */
 static void
 test_atomics_choice(void)
 {
@@ -572,13 +648,24 @@ test_atomics_choice(void)
    T("G16G: HK_PACK_ATOMICS=off keeps them apart",
      !hk_pack_atomics_choice(true, "off", 1) &&
         !hk_pack_atomics_choice(true, "OFF", 1));
-   T("M5: atomics apart by default", !hk_pack_atomics_choice(false, NULL, 1));
+   T("M5: single kernel queue packs atomics by default",
+     hk_pack_atomics_choice(false, NULL, 1) &&
+        hk_pack_atomics_choice(false, NULL, 0));
+   T("M5: HK_PACK_ATOMICS=0 disables single-queue atomics packing",
+     !hk_pack_atomics_choice(false, "0", 1));
+   T("M5: HK_PACK_ATOMICS=off disables single-queue atomics packing",
+     !hk_pack_atomics_choice(false, "off", 1) &&
+        !hk_pack_atomics_choice(false, "OFF", 1));
    T("M5: HK_PACK_ATOMICS=1 with one kernel queue",
      hk_pack_atomics_choice(false, "1", 1));
-   T("M5: HK_PACK_ATOMICS=1 with two kernel queues",
+   T("M5: two kernel queues keep atomics apart by default",
+     !hk_pack_atomics_choice(false, NULL, 2));
+   T("M5: HK_PACK_ATOMICS=1 with two kernel queues stays apart",
      !hk_pack_atomics_choice(false, "1", 2));
-   T("M5: an unparsable value keeps the default",
-     !hk_pack_atomics_choice(false, "maybe", 1));
+   T("M5: HK_PACK_ATOMICS=on with two kernel queues stays apart",
+     !hk_pack_atomics_choice(false, "on", 2));
+   T("M5: an unparsable value keeps single-queue default",
+     hk_pack_atomics_choice(false, "maybe", 1));
    T("M5: HK_PACK_ATOMICS=on with one kernel queue",
      hk_pack_atomics_choice(false, "on", 1));
 }

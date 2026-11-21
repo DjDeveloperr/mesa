@@ -2966,7 +2966,6 @@ dispatch_grid(struct hk_cmd_buffer *cmd, struct agx_grid grid, bool in_threads)
    }
    hk_dispatch_with_local_size(cmd, cs, s, grid, local_size);
    cs->uses_global_atomics |= s->b.info.uses_global_atomics;
-   cs->pack_loops |= s->b.info.has_loops;
    if (agx_is_indirect(grid)) {
       cs->sib_indirect = true;
    } else {
@@ -2976,8 +2975,8 @@ dispatch_grid(struct hk_cmd_buffer *cmd, struct agx_grid grid, bool in_threads)
                            ? UINT64_MAX : cs->sib_threads + threads;
 
       /* What submit packing bounds a packet with (hk_pack_plan()). Static
-       * instruction counts bound a program without loops; pack_loops marks
-       * the others, at most one of which a packet holds. */
+       * instruction counts bound straight-line programs; looping dispatches
+       * are tracked separately against a tighter watchdog-safe loop budget. */
       uint64_t work;
       if (__builtin_mul_overflow(threads, (uint64_t)s->b.info.stats.instrs,
                                  &work))
@@ -2987,6 +2986,12 @@ dispatch_grid(struct hk_cmd_buffer *cmd, struct agx_grid grid, bool in_threads)
       cs->pack_static_work = work > UINT64_MAX - cs->pack_static_work
                                 ? UINT64_MAX : cs->pack_static_work + work;
       cs->pack_dispatches++;
+      if (s->b.info.has_loops) {
+         cs->pack_loop_dispatches++;
+         cs->pack_loop_static_work =
+            work > UINT64_MAX - cs->pack_loop_static_work
+               ? UINT64_MAX : cs->pack_loop_static_work + work;
+      }
    }
    if (unlikely(hk_cmd_buffer_device(cmd)->frame_anatomy)) {
       hk_frame_anatomy_note_fs(cs, s);

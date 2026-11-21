@@ -77,7 +77,9 @@ hk_pack_atomics_choice(bool serial_kernel, const char *opt, unsigned queues)
 {
    if (serial_kernel)
       return opt ? hk_pack_parse_bool(opt, true) : true;
-   return opt && hk_pack_parse_bool(opt, false) && queues <= 1;
+   if (queues > 1)
+      return false;
+   return opt ? hk_pack_parse_bool(opt, true) : true;
 }
 
 const struct hk_cs *
@@ -252,10 +254,10 @@ hk_pack_plan(const struct hk_pack_member *members, unsigned n,
    unsigned run_count = 0;
    struct hk_pack_run run = {0};
    uint64_t dispatches = 0, threads = 0, work = 0;
+   uint64_t loop_dispatches = 0, loop_work = 0;
    size_t resources = 0;
    uint32_t attachments = 0;
    uint8_t kinds = 0, waits = 0, tails[HK_SYNC_NUM_KINDS] = {0};
-   bool loops = false;
 
    *packed_members = 0;
    *total = 0;
@@ -264,11 +266,23 @@ hk_pack_plan(const struct hk_pack_member *members, unsigned n,
       const struct hk_pack_member *m = i < n ? &members[i] : NULL;
       const struct hk_cs *cs = m ? m->cs : NULL;
 
+      /* Keep multiple looping streams within a tighter dispatch and static-work
+       * budget so dynamic loop iterations cannot accumulate toward the kernel
+       * watchdog timeout. A single larger looping stream may still pack with
+       * straight-line streams as long as the overall packet bounds hold. */
+      const bool loop_fits =
+         !cs || !loop_dispatches || !cs->pack_loop_dispatches ||
+         (loop_dispatches + cs->pack_loop_dispatches <=
+             HK_PACK_MAX_LOOP_DISPATCHES &&
+          loop_work <= HK_PACK_MAX_LOOP_STATIC_WORK &&
+          cs->pack_loop_static_work <=
+             HK_PACK_MAX_LOOP_STATIC_WORK - loop_work);
+
       const bool fits = cs && run.count &&
          !(m->render_ran && (m->kinds & ~kinds)) &&
          !((m->render_waits | hk_pack_tail(tails, kinds | m->kinds)) &
            ~waits) &&
-         !(loops && cs->pack_loops) &&
+         loop_fits &&
          dispatches + cs->stats.cmds <= HK_PACK_MAX_DISPATCHES &&
          cs->pack_threads <= HK_PACK_MAX_THREADS - threads &&
          cs->pack_static_work <= HK_PACK_MAX_STATIC_WORK - work &&
@@ -282,12 +296,15 @@ hk_pack_plan(const struct hk_pack_member *members, unsigned n,
          dispatches += cs->stats.cmds;
          threads += cs->pack_threads;
          work += cs->pack_static_work;
+         loop_dispatches += cs->pack_loop_dispatches;
+         loop_work = cs->pack_loop_static_work > UINT64_MAX - loop_work
+                        ? UINT64_MAX
+                        : loop_work + cs->pack_loop_static_work;
          resources += cs->compute_resources.size;
          attachments += cs->compute_attachments.count;
          kinds |= m->kinds;
          for (unsigned k = 0; k < HK_SYNC_NUM_KINDS; ++k)
             tails[k] |= m->render_tail[k];
-         loops |= cs->pack_loops;
          continue;
       }
 
@@ -301,6 +318,7 @@ hk_pack_plan(const struct hk_pack_member *members, unsigned n,
       }
       run = (struct hk_pack_run){0};
       dispatches = threads = work = 0;
+      loop_dispatches = loop_work = 0;
       resources = 0;
       attachments = 0;
 
@@ -310,12 +328,13 @@ hk_pack_plan(const struct hk_pack_member *members, unsigned n,
          dispatches = cs->stats.cmds;
          threads = cs->pack_threads;
          work = cs->pack_static_work;
+         loop_dispatches = cs->pack_loop_dispatches;
+         loop_work = cs->pack_loop_static_work;
          resources = cs->compute_resources.size;
          attachments = cs->compute_attachments.count;
          kinds = m->kinds;
          waits = m->render_waits;
          memcpy(tails, m->render_tail, sizeof(tails));
-         loops = cs->pack_loops;
       }
    }
 
