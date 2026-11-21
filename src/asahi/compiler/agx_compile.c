@@ -16608,6 +16608,18 @@ agx_compile_shader_nir_once(nir_shader *nir, struct agx_shader_key *key,
        nir->info.shared_size && !key->secondary)
       NIR_PASS(_, nir, agx3c_cse_flat_shared_reads);
 
+   if (key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+       !key->dev.emit_agx3d &&
+       nir->info.stage == MESA_SHADER_COMPUTE && !nir->info.internal &&
+       nir->info.shared_size && !key->secondary) {
+      bool packed = false;
+      NIR_PASS(packed, nir, agx_nir_opt_shared_vec2);
+      if (packed) {
+         NIR_PASS(_, nir, nir_opt_dce);
+         nir_divergence_analysis(nir);
+      }
+   }
+
    /* A workgroup of one subgroup needs only SIMD-group fences. (Runs after
     * any pass that delimits shared-memory phases by workgroup barriers.) */
    if (key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
