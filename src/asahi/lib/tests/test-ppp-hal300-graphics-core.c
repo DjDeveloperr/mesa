@@ -399,6 +399,50 @@ main(void)
    f.vertex_varying_components = 2;
    f.fragment_varying_components = 3;
    CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G18G, &f, &out));
+
+   /* In-place fragment-program patching must produce the exact same bytes as
+    * a full pack and reject unaligned, zero, or out-of-range addresses without
+    * modifying the existing payload. */
+   {
+      struct agx_ppp_hal300_graphics_fields pf = {
+         .fragment_program = UINT64_C(0x10000170700),
+         .varying_table = UINT64_C(0x100000004c0),
+         .cf_binding_count = 2,
+         .point_size_output = true,
+         .vertex_varying_components = 4,
+         .fragment_varying_components = 4,
+         .fragment_writes_depth = true,
+      };
+      struct agx_ppp_hal300_graphics_core packed, patched;
+      CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17S, &pf, &patched));
+
+      const uint64_t new_addrs[] = {
+         UINT64_C(0x100001b8700),
+         UINT64_C(0xa5c001234540),
+         UINT64_C(0x0000ffffffffffc0),
+      };
+      for (unsigned i = 0; i < sizeof(new_addrs) / sizeof(new_addrs[0]); ++i) {
+         pf.fragment_program = new_addrs[i];
+         CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17S, &pf, &packed));
+         CHECK(agx_ppp_hal300_graphics_core_patch_program(
+            AGX_CHIP_G17S, &patched, new_addrs[i], pf.fragment_ti_spill_B));
+         CHECK(memcmp(&packed, &patched, sizeof(packed)) == 0);
+      }
+
+      const struct agx_ppp_hal300_graphics_core saved = patched;
+      CHECK(!agx_ppp_hal300_graphics_core_patch_program(
+         AGX_CHIP_G17S, &patched, 0, 0));
+      CHECK(!agx_ppp_hal300_graphics_core_patch_program(
+         AGX_CHIP_G17S, &patched, UINT64_C(0x100001b8701), 0));
+      CHECK(!agx_ppp_hal300_graphics_core_patch_program(
+         AGX_CHIP_G17S, &patched, UINT64_C(1) << 48, 0));
+      CHECK(!agx_ppp_hal300_graphics_core_patch_program(
+         AGX_CHIP_G17P, &patched, UINT64_C(0x100001b8700), 0));
+      CHECK(!agx_ppp_hal300_graphics_core_patch_program(
+         AGX_CHIP_G17S, NULL, UINT64_C(0x100001b8700), 0));
+      CHECK(memcmp(&saved, &patched, sizeof(saved)) == 0);
+   }
+
    puts("M5 native PPP graphics records: PASS");
    return 0;
 }

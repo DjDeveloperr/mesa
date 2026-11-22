@@ -235,7 +235,9 @@ agx_ppp_hal300_graphics_core_pack_g18g(
     * vertex state. The captured 01000000/00005c1c points to 0x10000170700.
     * Metal's cull mode and front-facing winding map to cull bits 0..1 and
     * winding bit 16 above. */
-   memcpy(staged.bytes + staged.offsets[1] + 16, program.bytes, 8);
+   memcpy(staged.bytes + staged.offsets[AGX_PPP_HAL300_PROGRAM_RECORD] +
+             AGX_PPP_HAL300_PROGRAM_RECORD_PAIR_OFFSET,
+          program.bytes, AGX_PPP_HAL300_PROGRAM_RECORD_PAIR_SIZE);
    *out = staged;
    return true;
 }
@@ -458,7 +460,34 @@ agx_ppp_hal300_graphics_core_pack(
       offset += lengths[i];
    }
 
-   memcpy(staged.bytes + staged.offsets[1] + 16, program.bytes, 8);
+   memcpy(staged.bytes + staged.offsets[AGX_PPP_HAL300_PROGRAM_RECORD] +
+             AGX_PPP_HAL300_PROGRAM_RECORD_PAIR_OFFSET,
+          program.bytes, AGX_PPP_HAL300_PROGRAM_RECORD_PAIR_SIZE);
    *out = staged;
+   return true;
+}
+
+bool
+agx_ppp_hal300_graphics_core_patch_program(
+   enum agx_chip chip, struct agx_ppp_hal300_graphics_core *core,
+   uint64_t fragment_program, uint32_t fragment_ti_spill_B)
+{
+   if (!agx_chip_g17_m5(chip) || !core || !fragment_program)
+      return false;
+
+   const uint64_t ti_spill_quads = ((uint64_t)fragment_ti_spill_B + 3) >> 2;
+   if (ti_spill_quads > 0x3ffff)
+      return false;
+
+   struct agx_vdm_state_vertex_pipeline_pair program;
+   if (!agx_vdm_state_vertex_pipeline_pair_pack(
+          chip, fragment_program, (uint32_t)(ti_spill_quads << 3), &program))
+      return false;
+
+   _Static_assert(sizeof(program.bytes) == AGX_PPP_HAL300_PROGRAM_RECORD_PAIR_SIZE,
+                  "HAL300 fragment program pair size mismatch");
+   memcpy(core->bytes + core->offsets[AGX_PPP_HAL300_PROGRAM_RECORD] +
+             AGX_PPP_HAL300_PROGRAM_RECORD_PAIR_OFFSET,
+          program.bytes, AGX_PPP_HAL300_PROGRAM_RECORD_PAIR_SIZE);
    return true;
 }
