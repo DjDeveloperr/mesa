@@ -1885,7 +1885,7 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
    const int16_t byte_offset =
       (int16_t)(shift >> AGX_NIR_MEMORY_BYTE_OFFSET_SHIFT);
    assert(!byte_offset ||
-          b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C);
+          agx_isa_is_agx3(b->shader->key->dev.encoding));
    shift &= ~(AGX_NIR_MEMORY_INDEX_BYTES | AGX_NIR_MEMORY_PACKED_COUNT_MASK |
               AGX_NIR_MEMORY_UNPACK_W8_WORD | AGX_NIR_MEMORY_BYTE_OFFSET_MASK);
 
@@ -2081,7 +2081,7 @@ agx_emit_store(agx_builder *b, nir_intrinsic_instr *instr)
    const int16_t byte_offset =
       (int16_t)(shift >> AGX_NIR_MEMORY_BYTE_OFFSET_SHIFT);
    assert(!byte_offset ||
-          b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C);
+          agx_isa_is_agx3(b->shader->key->dev.encoding));
    shift &= ~(AGX_NIR_MEMORY_INDEX_BYTES | AGX_NIR_MEMORY_BYTE_OFFSET_MASK);
 
    assert(shift <= 3);
@@ -6273,6 +6273,20 @@ agx_lower_agx3_widening_int(agx_context *ctx)
           agx_channels(I->dest[0]) != 1)
          continue;
 
+      /* AGX3B/AGX3C natively encode unshifted 32-bit register+register IADD
+       * with 16-bit source width (plain=sext, abs=zext) in agx3_iadd_encode().
+       * AGX3C additionally encodes shifted (1..4) non-negated mixed-width
+       * register+register IADD in the same form. Keep explicit widening for
+       * unsupported shifts, uniforms/immediates, or G18G. */
+      const bool agx3c_shifted =
+         ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+         I->shift <= 4 && !I->src[0].neg && !I->src[1].neg;
+      if (I->op == AGX_OPCODE_IADD && !ctx->key->dev.emit_agx3d &&
+          (I->shift == 0 || agx3c_shifted) &&
+          I->src[0].type == AGX_INDEX_NORMAL && I->src[1].type == AGX_INDEX_NORMAL &&
+          !(I->src[0].neg && I->src[1].neg))
+         continue;
+
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
       agx_foreach_src(I, s) {
          agx_index src = I->src[s];
@@ -10378,7 +10392,7 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
     * want to vectorize first since nir_opt_load_store_vectorize doesn't know
     * how to handle our loads. Likewise for uniform atomic optimization.
     */
-   NIR_PASS(_, nir, agx_nir_lower_address, byte_indices, m5,
+   NIR_PASS(_, nir, agx_nir_lower_address, byte_indices || m5, byte_indices || m5,
             checked_offsets);
 
    /* Now that loads carry an index, a select between two of them can choose

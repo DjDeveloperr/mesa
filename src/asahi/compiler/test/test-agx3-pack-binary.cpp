@@ -16637,3 +16637,261 @@ TEST_F(AGX3PackBinary, TwoImmediateFaddPacksAfterLoweringOnEveryAgx3)
       }
    }
 }
+
+/* AGX3C device loads and stores encode 16-bit signed memory_byte_offset on
+ * both immediate and register indices (element-scaled and byte-indexed). */
+TEST_F(AGX3PackBinary, AGX3CSignedMemoryByteOffsetLoadAndStore)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3C;
+   key.dev.chip = AGX_CHIP_G17S;
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+
+   const int16_t offsets[] = {28, 776, -16, INT16_MIN, INT16_MAX};
+   for (bool is_store : {false, true}) {
+      for (int16_t off : offsets) {
+         for (unsigned mode = 0; mode < 3; ++mode) {
+            /* mode 0: immediate index 0; mode 1: signed scaled reg index;
+             * mode 2: unsigned byte-indexed reg index. */
+            SCOPED_TRACE((is_store ? 1000 : 0) + (int)mode * 100 + off);
+            agx_builder *b = builder(enc);
+            agx_index base = agx_uniform(8, AGX_SIZE_64);
+            agx_index idx = mode == 0 ? agx_immediate(0)
+                                      : agx_register(4, AGX_SIZE_32);
+            if (mode == 2)
+               idx.abs = true;
+
+            agx_instr *I;
+            if (is_store) {
+               I = agx_device_store(b, agx_register(16, AGX_SIZE_32), base, idx,
+                                    AGX_FORMAT_I32, 0x1, 0, false);
+            } else {
+               I = agx_device_load_to(b, agx_register(16, AGX_SIZE_32), base,
+                                      idx, AGX_FORMAT_I32, 0x1, 0, false);
+            }
+            I->memory_byte_offset = off;
+            I->memory_index_is_bytes = (mode == 2);
+            agx_stop(b);
+
+            struct agx3_mem_desc d = {};
+            d.data = 16;
+            d.width = AGX3_MEM_W32;
+            d.mask = 0x1;
+            d.base_is_uniform = true;
+            d.base = 8;
+            d.byte_off = off;
+            if (mode == 0) {
+               d.idx_kind = AGX3_MEM_IDX_IMM;
+               d.shift = 0;
+            } else {
+               d.idx_kind = AGX3_MEM_IDX_REG;
+               d.idx_reg = 4;
+               d.idx_signed = (mode == 1);
+               d.shift = (mode == 2) ? 0 : 2;
+            }
+            if (!is_store)
+               d.slot = 1;
+
+            uint8_t bytes[AGX3_MEM_MAX_LENGTH], len = 0;
+            ASSERT_TRUE(is_store
+                           ? agx3_mem_encode_store(enc, &d, bytes, &len)
+                           : agx3_mem_encode_load(enc, &d, bytes, &len));
+            std::vector<uint8_t> want(bytes, bytes + len);
+            append(want, end.bytes, end.length);
+            EXPECT_EQ(pack(b), want);
+         }
+      }
+   }
+}
+
+/* AGX3C natively packs unshifted and shifted (1..4) mixed-width 32+16/16+16
+ * register+register IADD as well as unshifted mixed-width ISUB, across the
+ * full 256-half file, and fails closed on unsupported forms. */
+TEST_F(AGX3PackBinary, AGX3CMixedWidthIaddAndIsub)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3C;
+   key.dev.chip = AGX_CHIP_G17S;
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+
+   struct add_case {
+      uint16_t dest, a_reg, b_reg;
+      bool a16, b16, a_abs, b_abs;
+      uint8_t shift;
+   };
+   const struct add_case add_cases[] = {
+      /* Unshifted 32+16, 16+32, 16+16 (sext and zext), including odd/high halves. */
+      {30, 30, 22, false, true, false, false, 0},
+      {30, 30, 23, false, true, false, true, 0},
+      {30, 23, 30, true, false, false, false, 0},
+      {30, 23, 30, true, false, true, false, 0},
+      {130, 131, 255, true, true, false, false, 0},
+      {130, 131, 255, true, true, true, true, 0},
+      {130, 131, 255, true, true, false, true, 0},
+      /* Shifted non-negated register+register mixed-width adds (shift 1..4). */
+      {30, 30, 23, false, true, false, false, 2},
+      {30, 30, 23, false, true, false, true, 4},
+      {130, 131, 131, true, true, true, true, 1},
+      {130, 255, 130, true, false, true, false, 1},
+   };
+   for (size_t i = 0; i < ARRAY_SIZE(add_cases); ++i) {
+      const auto &c = add_cases[i];
+      SCOPED_TRACE(i);
+      agx_builder *b = builder(enc);
+      agx_index sa = agx_register(c.a_reg, c.a16 ? AGX_SIZE_16 : AGX_SIZE_32);
+      agx_index sb = agx_register(c.b_reg, c.b16 ? AGX_SIZE_16 : AGX_SIZE_32);
+      sa.abs = c.a_abs;
+      sb.abs = c.b_abs;
+      sa.discard = true;
+      sb.cache = true;
+      agx_iadd_to(b, agx_register(c.dest, AGX_SIZE_32), sa, sb, c.shift);
+      agx_stop(b);
+
+      struct agx3_iadd_desc d = {};
+      d.dest = c.dest;
+      d.src_a_is_register = true;
+      d.src_a_reg = c.a_reg;
+      d.src_a_16 = c.a16;
+      d.src_a_sign_extend = c.a16 && !c.a_abs;
+      d.src_a_kill = true;
+      d.src = c.b_reg;
+      d.src_16 = c.b16;
+      d.sign_extend = c.b16 && !c.b_abs;
+      d.src_cache = true;
+      d.shift = c.shift;
+
+      uint8_t bytes[AGX3_IADD_MAX_LENGTH], len = 0;
+      ASSERT_TRUE(agx3_iadd_encode(enc, &d, bytes, &len));
+      std::vector<uint8_t> want(bytes, bytes + len);
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want);
+   }
+
+   /* Unshifted mixed-width register+register subtractions (direct & commuted). */
+   struct sub_case {
+      uint16_t dest, a_reg, b_reg;
+      bool a16, b16, a_abs, b_abs, a_neg, b_neg;
+   };
+   const struct sub_case sub_cases[] = {
+      {30, 30, 23, false, true, false, false, false, true},
+      {30, 30, 23, false, true, false, true, false, true},
+      {30, 23, 30, true, false, true, false, false, true},
+      {30, 23, 30, true, false, true, false, true, false},
+      {130, 131, 255, true, true, false, true, false, true},
+   };
+   for (size_t i = 0; i < ARRAY_SIZE(sub_cases); ++i) {
+      const auto &c = sub_cases[i];
+      SCOPED_TRACE(i);
+      agx_builder *b = builder(enc);
+      agx_index sa = agx_register(c.a_reg, c.a16 ? AGX_SIZE_16 : AGX_SIZE_32);
+      agx_index sb = agx_register(c.b_reg, c.b16 ? AGX_SIZE_16 : AGX_SIZE_32);
+      sa.abs = c.a_abs;
+      sa.neg = c.a_neg;
+      sb.abs = c.b_abs;
+      sb.neg = c.b_neg;
+      sa.discard = true;
+      sb.discard = true;
+      agx_iadd_to(b, agx_register(c.dest, AGX_SIZE_32), sa, sb, 0);
+      agx_stop(b);
+
+      const bool swap = c.a_neg && !c.b_neg;
+      struct agx3_iadd_desc d = {};
+      d.dest = c.dest;
+      d.dest_cache = true;
+      d.src_a_is_register = true;
+      d.src_a_reg = swap ? c.b_reg : c.a_reg;
+      d.src_a_16 = swap ? c.b16 : c.a16;
+      d.src_a_sign_extend = d.src_a_16 && !(swap ? c.b_abs : c.a_abs);
+      d.src_a_kill = true;
+      d.src = swap ? c.a_reg : c.b_reg;
+      d.src_16 = swap ? c.a16 : c.b16;
+      d.sign_extend = d.src_16 && !(swap ? c.a_abs : c.b_abs);
+      d.src_kill = true;
+      d.subtract = true;
+
+      uint8_t bytes[AGX3_IADD_MAX_LENGTH], len = 0;
+      ASSERT_TRUE(agx3_iadd_encode(enc, &d, bytes, &len));
+      std::vector<uint8_t> want(bytes, bytes + len);
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want);
+   }
+
+   /* Fail-closed checks: saturating mixed-width, double-negated, shifted sub. */
+   {
+      agx_builder *b = builder(enc);
+      agx_instr *sat = agx_iadd_to(b, agx_register(30, AGX_SIZE_32),
+                                   agx_register(30, AGX_SIZE_32),
+                                   agx_register(23, AGX_SIZE_16), 0);
+      sat->saturate = true;
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, false).empty());
+   }
+   {
+      agx_builder *b = builder(enc);
+      agx_index a = agx_neg(agx_register(21, AGX_SIZE_16));
+      agx_index c = agx_neg(agx_register(23, AGX_SIZE_16));
+      agx_iadd_to(b, agx_register(30, AGX_SIZE_32), a, c, 0);
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, false).empty());
+   }
+   {
+      agx_builder *b = builder(enc);
+      agx_index c = agx_neg(agx_register(23, AGX_SIZE_16));
+      agx_iadd_to(b, agx_register(30, AGX_SIZE_32),
+                  agx_register(30, AGX_SIZE_32), c, 1);
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, false).empty());
+   }
+}
+
+/* End-to-end NIR compilation of mixed-width 32+16 adds (unshifted, shifted,
+ * subtracted) and signed byte-offset / byte-indexed global loads across
+ * AGX3B, AGX3C (G17S), and AGX3D (G18G). */
+TEST_F(AGX3PackBinary, AGX3CMixedWidthIaddAndByteOffsetEndToEnd)
+{
+   const struct {
+      enum agx_isa_encoding enc;
+      enum agx_chip chip;
+      bool agx3d;
+   } targets[] = {
+      {AGX_ISA_ENCODING_AGX3B, AGX_CHIP_G17P, false},
+      {AGX_ISA_ENCODING_AGX3C, AGX_CHIP_G17S, false},
+      {AGX_ISA_ENCODING_AGX3C, AGX_CHIP_G18G, true},
+   };
+
+   for (const auto &t : targets) {
+      SCOPED_TRACE(t.chip);
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "agx3_iadd16_byteoff");
+      nir_def *base = agx_test_load_preamble(&b, 1, 64, 0);
+      nir_def *gid = nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0);
+      nir_def *byte_off = nir_iadd_imm(&b, nir_imul_imm(&b, gid, 12), 28);
+      nir_def *addr = nir_iadd(&b, base, nir_u2u64(&b, byte_off));
+      nir_def *w = nir_load_global(&b, 1, 32, addr, .align_mul = 4);
+      nir_def *h = nir_load_global(&b, 1, 16, nir_iadd_imm(&b, addr, 4),
+                                   .align_mul = 2);
+      nir_def *s = nir_load_global(&b, 1, 16, nir_iadd_imm(&b, addr, 6),
+                                   .align_mul = 2);
+      nir_def *r0 = nir_iadd(&b, w, nir_u2u32(&b, h));
+      nir_def *r1 = nir_iadd(&b, r0, nir_ishl_imm(&b, nir_i2i32(&b, s), 2));
+      nir_def *r2 = nir_isub(&b, r1, nir_u2u32(&b, h));
+      nir_store_global(&b, r2, nir_iadd_imm(&b, addr, -16), .align_mul = 4);
+      b.shader->info.workgroup_size[0] = 32;
+      b.shader->info.workgroup_size[1] = 1;
+      b.shader->info.workgroup_size[2] = 1;
+
+      agx_shader_key k = {};
+      k.dev.encoding = t.enc;
+      k.dev.chip = t.chip;
+      k.dev.emit_agx3d = t.agx3d;
+      k.no_preamble = true;
+      k.reserved_preamble = 16;
+
+      agx_preprocess_nir(b.shader);
+      agx_shader_part part = {};
+      ASSERT_TRUE(agx_compile_shader_nir(b.shader, &k, &part));
+      EXPECT_GT(part.info.stats.instrs, 0u);
+      free(part.binary);
+      ralloc_free(b.shader);
+   }
+}

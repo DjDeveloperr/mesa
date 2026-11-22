@@ -1008,7 +1008,11 @@ agx_optimizer_copyprop(agx_context *ctx, agx_instr **defs, agx_instr *I)
           (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
            agx_is_g18g(&ctx->key->dev)) &&
           def->src[0].size == AGX_SIZE_16 && src.size == AGX_SIZE_32 &&
-          (I->op == AGX_OPCODE_IADD || I->op == AGX_OPCODE_IMAD ||
+          ((I->op == AGX_OPCODE_IADD &&
+            (I->saturate || I->shift != 0 || agx_is_g18g(&ctx->key->dev) ||
+             I->src[1 - s].type != AGX_INDEX_NORMAL ||
+             (I->src[0].neg && I->src[1].neg))) ||
+           I->op == AGX_OPCODE_IMAD ||
            I->op == AGX_OPCODE_ICMP || I->op == AGX_OPCODE_ICMPSEL ||
            I->op == AGX_OPCODE_BFI || I->op == AGX_OPCODE_BFEIL ||
            (I->op == AGX_OPCODE_EXTR && s < 2) ||
