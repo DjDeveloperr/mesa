@@ -548,15 +548,6 @@ agx3_emit(struct util_dynarray *emission, enum agx_isa_encoding enc,
  * NaN when just one input is NaN. Keep the existing unordered-comparison
  * mapping for untied selects. */
 static bool
-agx3_fcmpsel_tied_minmax(const agx_instr *I)
-{
-   return !I->invert_cond && !I->saturate &&
-          (I->fcond == AGX_FCOND_LTN || I->fcond == AGX_FCOND_GTN) &&
-          agx_is_equiv(I->src[0], I->src[2]) &&
-          agx_is_equiv(I->src[1], I->src[3]);
-}
-
-static bool
 agx3_fcmpsel_all_half_regs(const agx_instr *I)
 {
    for (unsigned i = 0; i < 4; ++i) {
@@ -17530,21 +17521,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          /* Keep the uniform half of a native tied min/max in the uniform file.
           * Canonicalize just as the register/minifloat path below does.
           * G18G keeps its own compare-select forms below. */
-         if (enc == AGX_ISA_ENCODING_AGX3C && !ctx->key->dev.emit_agx3d &&
-             I->op == AGX_OPCODE_FCMPSEL &&
-             I->nr_dests == 1 && I->nr_srcs == 4 && !I->saturate &&
-             !I->fcmpsel_minifloat_select &&
-             (agx3_vary_reg32(I->dest[0]) || agx3_half_reg(I->dest[0])) &&
-             agx_channels(I->dest[0]) == 1 &&
-             (((agx3_vary_reg32(I->src[0]) || agx3_half_reg(I->src[0])) &&
-               (agx3_vary_reg32(I->src[1]) || agx3_half_reg(I->src[1]) ||
-                (I->src[1].type == AGX_INDEX_IMMEDIATE && I->src[1].value <= 255))) ||
-              (I->src[0].type == AGX_INDEX_IMMEDIATE && I->src[0].value <= 255 &&
-               (agx3_vary_reg32(I->src[1]) || agx3_half_reg(I->src[1])))) &&
-             ((I->src[2].type == AGX_INDEX_IMMEDIATE && I->src[2].value <= UINT8_MAX) ||
-              (agx3_half_reg(I->dest[0]) && agx3_half_reg(I->src[2]))) &&
-             ((I->src[3].type == AGX_INDEX_IMMEDIATE && I->src[3].value <= UINT8_MAX) ||
-              (agx3_half_reg(I->dest[0]) && agx3_half_reg(I->src[3])))) {
+         if (agx3_fcmpsel_gpu1_supported(&ctx->key->dev, I, true)) {
             const bool reverse = I->src[0].type == AGX_INDEX_IMMEDIATE;
             const agx_index cmp[2] = {I->src[reverse ? 1 : 0],
                                       I->src[reverse ? 0 : 1]};

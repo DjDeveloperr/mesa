@@ -7489,3 +7489,220 @@ TEST(NativeForms, M5FenceMemToTexUsesNonRendezvousFences)
    free(part.binary);
    ralloc_free(b.shader);
 }
+
+/* On AGX3C, agx_optimizer_fmov must not fold .abs/.neg into FCMP, FCMPSEL, or
+ * BREAK_IF_FCMP comparands, since AGX3C has no native comparand modifier and
+ * folding a preheader move forces re-materialization inside the loop. */
+TEST(NativeForms, Agx3cOptimizerDoesNotFoldModifiersIntoFloatCompares)
+{
+   const enum agx_opcode ops[] = {
+      AGX_OPCODE_FCMP,
+      AGX_OPCODE_FCMPSEL,
+      AGX_OPCODE_BREAK_IF_FCMP,
+   };
+
+   for (enum agx_opcode op : ops) {
+      for (bool agx3c : {true, false}) {
+         SCOPED_TRACE(op);
+         SCOPED_TRACE(agx3c);
+         void *mem = ralloc_context(NULL);
+         agx_shader_key key = {};
+         key.dev.encoding =
+            agx3c ? AGX_ISA_ENCODING_AGX3C : AGX_ISA_ENCODING_AGX3B;
+         key.dev.chip = agx3c ? AGX_CHIP_G17S : AGX_CHIP_G17P;
+
+         agx_builder *b = agx_test_builder(mem);
+         b->shader->key = &key;
+         b->cursor = agx_after_block(agx_start_block(b->shader));
+
+         agx_index x = agx_preload(b, agx_register(0, AGX_SIZE_32));
+         agx_index y = agx_preload(b, agx_register(2, AGX_SIZE_32));
+         agx_index neg_y = agx_temp(b->shader, AGX_SIZE_32);
+         agx_fmov_to(b, neg_y, agx_neg(y));
+
+         agx_instr *cmp = NULL;
+         if (op == AGX_OPCODE_FCMP) {
+            agx_index dst = agx_temp(b->shader, AGX_SIZE_16);
+            cmp = agx_fcmp_to(b, dst, x, neg_y, AGX_FCOND_LT, false);
+            agx_unit_test(b, dst);
+         } else if (op == AGX_OPCODE_FCMPSEL) {
+            agx_index dst = agx_temp(b->shader, AGX_SIZE_16);
+            cmp = agx_fcmpsel_to(b, dst, x, neg_y, agx_immediate(1),
+                                 agx_immediate(0), AGX_FCOND_LT);
+            agx_unit_test(b, dst);
+         } else {
+            cmp = agx_break_if_fcmp(b, x, neg_y, 1, 0, AGX_FCOND_LT, NULL);
+         }
+
+         agx_optimizer_forward(b->shader);
+         if (agx3c || op == AGX_OPCODE_BREAK_IF_FCMP) {
+            EXPECT_FALSE(cmp->src[1].neg);
+            EXPECT_EQ(cmp->src[1].value, neg_y.value);
+         } else {
+            EXPECT_TRUE(cmp->src[1].neg);
+            EXPECT_EQ(cmp->src[1].value, y.value);
+         }
+         ralloc_free(mem);
+      }
+   }
+}
+
+/* On AGX3C (non-G18G), untied 16-bit FCMPSEL keeps 8-bit integer select
+ * immediates (<= 255) inline instead of materializing MOV_IMM, and must NOT
+ * misclassify untied 0x20 alongside a 0.5f (minifloat 0x20) comparand as a
+ * tied minifloat (FP16 0x3800) -- protecting 8x MSAA sample 5 discard masks. */
+TEST(NativeForms, Agx3cHalfFcmpselInlineImmAndUntied0x20)
+{
+   /* Direct legalization check: untied 0x20 and 0 stay inline on AGX3C. */
+   {
+      void *mem = ralloc_context(NULL);
+      agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+      key.dev.chip = AGX_CHIP_G17S;
+
+      agx_builder *b = agx_test_builder(mem);
+      b->shader->key = &key;
+      b->cursor = agx_after_block(agx_start_block(b->shader));
+
+      agx_index x = agx_preload(b, agx_register(0, AGX_SIZE_32));
+      agx_index dst = agx_temp(b->shader, AGX_SIZE_16);
+      agx_instr *sel = agx_fcmpsel_to(b, dst, agx_immediate(0x20), x,
+                                      agx_immediate(0x20), agx_immediate(0),
+                                      AGX_FCOND_LT);
+      agx_unit_test(b, dst);
+
+      agx_materialize_agx3_alu_constants(b->shader);
+      EXPECT_EQ(sel->src[2].type, AGX_INDEX_IMMEDIATE);
+      EXPECT_EQ(sel->src[2].value, 0x20u);
+      EXPECT_EQ(sel->src[3].type, AGX_INDEX_IMMEDIATE);
+      EXPECT_EQ(sel->src[3].value, 0u);
+      ralloc_free(mem);
+   }
+
+   /* Tied 16-bit LTN/GTN min/max with minifloat immediate 0x20 (0.5f) on the
+    * AGX3C native path must still decode and materialize FP16 0x3800. */
+   for (enum agx_fcond cond : {AGX_FCOND_LTN, AGX_FCOND_GTN}) {
+      SCOPED_TRACE(cond);
+      void *mem = ralloc_context(NULL);
+      agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+      key.dev.chip = AGX_CHIP_G17S;
+
+      agx_builder *b = agx_test_builder(mem);
+      b->shader->key = &key;
+      b->cursor = agx_after_block(agx_start_block(b->shader));
+
+      agx_index x = agx_preload(b, agx_register(0, AGX_SIZE_16));
+      agx_index dst = agx_temp(b->shader, AGX_SIZE_16);
+      agx_instr *sel = agx_fcmpsel_to(b, dst, agx_immediate(0x20), x,
+                                      agx_immediate(0x20), x, cond);
+      agx_unit_test(b, dst);
+
+      agx_materialize_agx3_alu_constants(b->shader);
+      EXPECT_EQ(sel->src[2].type, AGX_INDEX_NORMAL);
+      bool found_half_0_5 = false;
+      agx_foreach_instr_global(b->shader, I) {
+         if (I->op == AGX_OPCODE_MOV_IMM &&
+             agx_is_equiv(I->dest[0], sel->src[2]) && I->imm == 0x3800u)
+            found_half_0_5 = true;
+      }
+      EXPECT_TRUE(found_half_0_5);
+      ralloc_free(mem);
+   }
+
+   /* Exact binary check: packing an untied 16-bit FCMPSEL with cmp0 = #0x20,
+    * cmp1 = r0, sel0 = #0x20, sel1 = #0 must emit the exact fseli16 instruction
+    * carrying sel[0] = 0x20 as a raw 8-bit integer immediate (and no MOV_IMM). */
+   {
+      void *mem = ralloc_context(NULL);
+      agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+      key.dev.chip = AGX_CHIP_G17S;
+
+      agx_builder *b = agx_test_builder(mem);
+      b->shader->key = &key;
+      b->cursor = agx_after_block(agx_start_block(b->shader));
+
+      agx_fcmpsel_to(b, agx_register(2, AGX_SIZE_16), agx_immediate(0x20),
+                     agx_register(0, AGX_SIZE_32), agx_immediate(0x20),
+                     agx_immediate(0), AGX_FCOND_LT);
+      agx_stop(b);
+
+      struct util_dynarray emission = UTIL_DYNARRAY_INIT;
+      ASSERT_TRUE(agx3_pack_binary(b->shader, &emission));
+
+      struct agx3_fsel32_gpu1_desc expected_desc = {};
+      expected_desc.dest = 2;
+      expected_desc.cmp0 = 0;
+      expected_desc.cmp1 = 0x20;
+      expected_desc.cmp1_immediate = true;
+      expected_desc.sel_immediate[0] = true;
+      expected_desc.sel_immediate[1] = true;
+      expected_desc.sel_integer = true;
+      expected_desc.sel[0] = 0x20;
+      expected_desc.sel[1] = 0;
+      expected_desc.condition = AGX_FCOND_GT; /* reversed from (0x20 < r0) */
+
+      uint8_t want_sel[AGX3_ALU_MAX_LENGTH], want_len = 0;
+      ASSERT_TRUE(agx3_alu_fcmp_select16_gpu1(&expected_desc, want_sel,
+                                              &want_len));
+      ASSERT_GE(emission.size, want_len);
+      EXPECT_EQ(memcmp(emission.data, want_sel, want_len), 0);
+
+      /* Also verify changing sel[0] from 0x20 to 0x21 changes the exact
+       * encoded instruction, confirming the field holds 0x20. */
+      expected_desc.sel[0] = 0x21;
+      uint8_t alt_sel[AGX3_ALU_MAX_LENGTH], alt_len = 0;
+      ASSERT_TRUE(agx3_alu_fcmp_select16_gpu1(&expected_desc, alt_sel,
+                                              &alt_len));
+      ASSERT_EQ(alt_len, want_len);
+      EXPECT_NE(memcmp(emission.data, alt_sel, want_len), 0);
+
+      util_dynarray_fini(&emission);
+      ralloc_free(mem);
+   }
+
+   /* End-to-end compile check: 0x0020 (bit 5) vs 0x3800 (FP16 0.5) must emit
+    * distinct binaries, and 0x0020 must keep the raw 8-bit immediate inline. */
+   auto compile_mask = [](uint16_t mask) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "half fcmpsel bitmask");
+      b.shader->info.workgroup_size[0] = 32;
+      b.shader->info.workgroup_size[1] = 1;
+      b.shader->info.workgroup_size[2] = 1;
+      nir_def *base = nir_load_preamble(&b, 1, 64, .base = 0);
+      nir_def *id = nir_u2u64(&b, nir_load_local_invocation_index(&b));
+      nir_def *in_addr = nir_iadd(&b, base, nir_ishl_imm(&b, id, 2));
+      nir_def *x = nir_load_global(&b, 1, 32, in_addr, .align_mul = 4);
+      nir_def *cond = nir_flt(&b, nir_imm_float(&b, 0.5f), x);
+      nir_def *sel = nir_bcsel(&b, cond, nir_imm_intN_t(&b, mask, 16),
+                               nir_imm_intN_t(&b, 0, 16));
+      nir_def *out_addr =
+         nir_iadd_imm(&b, nir_iadd(&b, base, nir_ishl_imm(&b, id, 1)), 256);
+      nir_store_global(&b, sel, out_addr, .align_mul = 2);
+      agx_preprocess_nir_native(b.shader, AGX_CHIP_G17S);
+
+      agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+      key.dev.chip = AGX_CHIP_G17S;
+      key.no_preamble = true;
+      key.reserved_preamble = 8;
+      agx_shader_part part = {};
+      EXPECT_TRUE(agx_compile_shader_nir(b.shader, &key, &part));
+      std::vector<uint8_t> bin;
+      if (part.binary)
+         bin.assign((const uint8_t *)part.binary,
+                    (const uint8_t *)part.binary + part.info.binary_size);
+      free(part.binary);
+      ralloc_free(b.shader);
+      return bin;
+   };
+
+   const std::vector<uint8_t> bin_bit5 = compile_mask(0x0020);
+   const std::vector<uint8_t> bin_half = compile_mask(0x3800);
+   ASSERT_FALSE(bin_bit5.empty());
+   ASSERT_FALSE(bin_half.empty());
+   EXPECT_NE(bin_bit5, bin_half);
+   /* 0x0020 stays inline in fseli16 while 0x3800 requires materialization. */
+   EXPECT_LT(bin_bit5.size(), bin_half.size());
+}

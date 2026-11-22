@@ -7128,11 +7128,16 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
          if (agx_isa_is_agx3(ctx->key->dev.encoding) &&
              I->op == AGX_OPCODE_FCMPSEL && I->dest[0].size == AGX_SIZE_16 &&
              !agx3c_fsel16_imm_encodable(ctx, I)) {
+            const bool m5_native_sel16_imm =
+               !agx3_fcmpsel_tied_minmax(I) &&
+               agx3_fcmpsel_gpu1_supported(&ctx->key->dev, I, false);
             /* Select alternatives are bit patterns, not minifloats -- except
              * in a tied minimum/maximum, where the optimizer deposited the
              * compared minifloat into the select slot too. */
             for (unsigned s = 2; s < 4; ++s) {
                if (I->src[s].type != AGX_INDEX_IMMEDIATE)
+                  continue;
+               if (m5_native_sel16_imm && agx3_fcmpsel_gpu1_imm8(I->src[s]))
                   continue;
                const agx_index cmp = I->src[s - 2];
                const bool tied = cmp.type == AGX_INDEX_IMMEDIATE &&
