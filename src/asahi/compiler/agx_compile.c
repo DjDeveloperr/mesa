@@ -13909,6 +13909,15 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p, bool native_fragment_dep
     */
    NIR_PASS(_, nir, nir_opt_idiv_const, 16);
 
+   {
+      bool lowered_udiv = false;
+      NIR_PASS(lowered_udiv, nir, agx_nir_opt_uniform_idiv);
+      if (lowered_udiv) {
+         NIR_PASS(_, nir, nir_opt_cse);
+         NIR_PASS(_, nir, nir_opt_dce);
+      }
+   }
+
    nir_lower_idiv_options idiv_options = {
       .allow_fp16 = true,
    };

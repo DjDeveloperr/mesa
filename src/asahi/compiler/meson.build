@@ -17,6 +17,7 @@ libasahi_agx_files = files(
   'agx_nir_opt_flatten_loads.c',
   'agx_nir_opt_select_load.c',
   'agx_nir_opt_licm.c',
+  'agx_nir_opt_uniform_idiv.c',
   'agx_nir_opt_sink_loop_sample_uses.c',
   'agx_nir_lower_clip_m1_1.c',
   'agx_nir_lower_cull_distance.c',
@@ -948,6 +949,19 @@ if with_tests
     executable(
       'agx3_g17p_task_kernel_shared_test',
       files('test/test-agx3-g17p-task-kernel-shared.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      gnu_symbol_visibility : 'hidden',
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_compiler],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'agx_uniform_idiv',
+    executable(
+      'agx_uniform_idiv_test',
+      files('test/test-agx-uniform-idiv.c'),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
       dependencies : [idep_nir, idep_mesautil],
