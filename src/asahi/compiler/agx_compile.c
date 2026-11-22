@@ -10525,7 +10525,7 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
       if (preamble_size && (epilog_has_alu || preamble_newly_enabled)) {
          nir_opt_reassociate_loop(
             nir, nir_reassociate_scalar_math | nir_reassociate_cse_heuristic |
-                    (m5 ? nir_reassociate_loop_invariant : 0));
+                    ((m5 || byte_indices) ? nir_reassociate_loop_invariant : 0));
       }
       if (epilog_has_alu)
          NIR_PASS(_, nir, agx_nir_lower_fminmax, g17p || m5);
@@ -10717,14 +10717,14 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
    }
 
    /* Reassociate before forming preambles because it makes preambles more
-    * effective. Clean up after. On M5, also order the loop-invariant terms of
+    * effective. Clean up after. On AGX3, also order the loop-invariant terms of
     * a chain in a loop first, so accumulations of per-iteration constants
     * (robustness loops add the same size queries every iteration) are summed
     * once in the preamble instead of once per term and iteration.
     */
    nir_opt_reassociate_loop(
       nir, nir_reassociate_scalar_math | nir_reassociate_cse_heuristic |
-              (m5 ? nir_reassociate_loop_invariant : 0));
+              ((m5 || byte_indices) ? nir_reassociate_loop_invariant : 0));
 
    /* Lower fmin/fmax before optimizing preambles so we can see across uniform
     * expressions. Do it after nir_opt_reassociate because nir_opt_reassociate
