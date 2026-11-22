@@ -433,11 +433,15 @@ test_movable(void)
         dispatched[1].cs == p2);
 }
 
+static const enum agx_chip reverse_oq_chips[] = {
+   AGX_CHIP_G17P, AGX_CHIP_G17G, AGX_CHIP_G17S, AGX_CHIP_G17C};
+
 /* Resolution runs from the end of the command buffer: a later stream whose
  * render carries its stores is gone before earlier streams are judged. */
 static void
-test_order(void)
+test_order_for_chip(enum agx_chip chip)
 {
+   test_chip = chip;
    struct hk_cmd_buffer *c = new_cmd();
    struct hk_cs *r[3], *p[3];
    for (unsigned i = 0; i < 3; ++i) {
@@ -531,6 +535,14 @@ test_order(void)
         dispatched[0].cs == p[0]);
 }
 
+static void
+test_order(void)
+{
+   for (unsigned i = 0; i < ARRAY_SIZE(reverse_oq_chips); ++i)
+      test_order_for_chip(reverse_oq_chips[i]);
+   test_chip = AGX_CHIP_G17P;
+}
+
 /* The other native AGX3 chips keep recording order: while an earlier stream is
  * judged, the later deferred stream still waits on its later render. */
 static void
@@ -563,7 +575,8 @@ test_stamp_chips(void)
    T("chips: G17P and M5 renders carry availability",
      hk_oq_render_stamps_supported(AGX_CHIP_G17P) &&
         hk_oq_render_stamps_supported(AGX_CHIP_G17G) &&
-        hk_oq_render_stamps_supported(AGX_CHIP_G17S));
+        hk_oq_render_stamps_supported(AGX_CHIP_G17S) &&
+        hk_oq_render_stamps_supported(AGX_CHIP_G17C));
    T("chips: G15 renders keep the queued store",
      !hk_oq_render_stamps_supported(AGX_CHIP_G15G) &&
         !hk_oq_render_stamps_supported(AGX_CHIP_G15S) &&
@@ -573,11 +586,11 @@ test_stamp_chips(void)
 }
 
 static void
-test_join_moves_query_access_ranges(void)
+test_join_moves_query_access_ranges_for_chip(enum agx_chip chip)
 {
    /* Reverse join (hk_oq_joins path): earlier free render's store joins into
     * later full render's movable stream, preserving moved imm_write_query_ranges. */
-   test_chip = AGX_CHIP_G17P;
+   test_chip = chip;
    struct hk_cmd_buffer *c = new_cmd();
    struct hk_cs *r0 = add(c, false);
    struct hk_cs *p0 = add_post(c, r0, 1, 1);
@@ -628,6 +641,14 @@ test_join_moves_query_access_ranges(void)
    T("join-rev-full: moved store query range and untracked flag survive",
      ndispatched == 1 && dispatched[0].cs == p1 && found_moved && found_local &&
         p1->imm_write_query_untracked);
+}
+
+static void
+test_join_moves_query_access_ranges(void)
+{
+   for (unsigned i = 0; i < ARRAY_SIZE(reverse_oq_chips); ++i)
+      test_join_moves_query_access_ranges_for_chip(reverse_oq_chips[i]);
+   test_chip = AGX_CHIP_G17P;
 }
 
 int
