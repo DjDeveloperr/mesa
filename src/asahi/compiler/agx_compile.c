@@ -8938,6 +8938,7 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
                             AGX_ROUND_RTZ);
 
    case nir_op_f2i32:
+   case nir_op_f2i32_sat:
       return agx_convert_to(b, dst, agx_immediate(AGX_CONVERT_F_TO_S32), s0,
                             AGX_ROUND_RTZ);
 
@@ -8946,6 +8947,7 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
                             AGX_ROUND_RTZ);
 
    case nir_op_f2u32:
+   case nir_op_f2u32_sat:
       return agx_convert_to(b, dst, agx_immediate(AGX_CONVERT_F_TO_U32), s0,
                             AGX_ROUND_RTZ);
 
@@ -9949,7 +9951,7 @@ agx_lower_front_face(struct nir_builder *b, nir_intrinsic_instr *intr,
  * the latter run should be almost a no-op.
  */
 static void
-agx_optimize_loop_nir(nir_shader *nir, bool m5, bool g17p)
+agx_optimize_loop_nir(nir_shader *nir, bool m5, bool agx3b, bool g17p)
 {
    const nir_shader_compiler_options *saved_options = nir->options;
    nir_shader_compiler_options options;
@@ -10004,10 +10006,10 @@ agx_optimize_loop_nir(nir_shader *nir, bool m5, bool g17p)
          NIR_PASS(progress, nir, nir_opt_phi_precision);
          break;
       case 7:
-         /* The M5 conversion has D3D's saturating, NaN-to-zero semantics.
-          * Fold before nir_opt_algebraic distributes a following add into the
-          * clamping selects. */
-         if (m5)
+         /* AGX3 (both AGX3B and AGX3C) hardware conversions have D3D's
+          * saturating, NaN-to-zero semantics. Fold before nir_opt_algebraic
+          * distributes a following add into the clamping selects. */
+         if (m5 || agx3b)
             NIR_PASS(progress, nir, agx_nir_fold_d3d_float_to_int);
          break;
       case 8:
@@ -10606,7 +10608,7 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
    /* This runs only once up front since other optimizations don't affect it */
    NIR_PASS(_, nir, nir_opt_shrink_stores, true);
 
-   agx_optimize_loop_nir(nir, m5, g17p);
+   agx_optimize_loop_nir(nir, m5, byte_indices, g17p);
 
    /* Loops are unrolled now: a subgroup XOR shuffle whose mask is still not
     * a constant takes the general lowering (agx_nir_lower_subgroups.c).
@@ -10615,7 +10617,7 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
       bool lowered = false;
       NIR_PASS(lowered, nir, agx_nir_lower_dynamic_shuffle_xor);
       if (lowered)
-         agx_optimize_loop_nir(nir, m5, g17p);
+         agx_optimize_loop_nir(nir, m5, byte_indices, g17p);
    }
 
    /* If soft fault is enabled, we can freely speculate everything. That lets us
@@ -14361,7 +14363,7 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p, bool native_fragment_dep
        * will run through the loop later, once we have the shader key, but if we
        * run now, that run will ideally be almost a no-op.
        */
-      agx_optimize_loop_nir(nir, !g17p && native_fragment_depth, g17p);
+      agx_optimize_loop_nir(nir, !g17p && native_fragment_depth, g17p, g17p);
    } else {
       NIR_PASS(_, nir, nir_opt_copy_prop);
       NIR_PASS(_, nir, nir_opt_constant_folding);
