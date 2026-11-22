@@ -1239,6 +1239,16 @@ agx_create_sampler_view(struct pipe_context *pctx,
 
    agx_legalize_compression(agx_context(pctx), rsrc, format);
 
+   /* Gallium AGX3 does not use compressed cube descriptors (a 6-layer
+    * compressed 2D array can be reinterpreted as a cube view via
+    * glTextureView). Decompress before creating a cube sampler view. */
+   if (rsrc->layout.compressed &&
+       agx_gallium_descriptor_generation_is_agx3(
+          agx_chip_descriptor_generation(agx_device(pctx->screen)->chip)) &&
+       target_is_cube(state->target)) {
+      agx_decompress(agx_context(pctx), rsrc, "Compressed cube view");
+   }
+
    /* Save off the resource that we actually use, with the stencil fixed up */
    so->rsrc = rsrc;
    so->format = format;
