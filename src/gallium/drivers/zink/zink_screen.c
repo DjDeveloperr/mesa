@@ -734,6 +734,16 @@ zink_borealis_g17p(const struct zink_screen *screen)
            screen->info.props.deviceID == 0x6041);
 }
 
+/* M5 (0x8142), M5 Pro and M5 Max (0x6050) run the Borealis M5 path
+ * (agx_params_m5_supported()). */
+static bool
+zink_borealis_m5(const struct zink_screen *screen)
+{
+   return zink_driverid(screen) == VK_DRIVER_ID_AURORA_BOREALIS &&
+          (screen->info.props.deviceID == 0x8142 ||
+           screen->info.props.deviceID == 0x6050);
+}
+
 static void
 zink_init_screen_caps(struct zink_screen *screen)
 {
@@ -3306,12 +3316,11 @@ init_driver_workarounds(struct zink_screen *screen)
     * attachment, so the usage is only that hint: create colour images without
     * it and recreate an image with it before a draw or copy first reads the
     * image while writing it (zink_update_lazy_feedback_loops()).
-    *
-    * Only G17P compresses on this rule; other Borealis parts keep the
-    * usage on every render target.
+    * G17P and M5 compress colour targets on this rule; other Borealis parts
+    * (AGX2, G15/G16) keep the usage on every render target.
     */
    screen->driver_workarounds.lazy_feedback_loop_usage =
-      zink_borealis_g17p(screen) &&
+      (zink_borealis_g17p(screen) || zink_borealis_m5(screen)) &&
       screen->driver_workarounds.general_layout &&
       screen->info.have_EXT_attachment_feedback_loop_layout;
 
