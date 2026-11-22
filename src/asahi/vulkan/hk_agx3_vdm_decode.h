@@ -33,7 +33,7 @@ extern "C" {
  * shaders drop the canonical layout for the relocatable one, and to 45 when
  * AGX3 fragment binaries carry on-chip local_read NIR payloads. */
 #define HK_AGX3_SHADER_BINARY_VERSION 45u
-#define HK_CLASSIC_SHADER_BINARY_VERSION 34u
+#define HK_CLASSIC_SHADER_BINARY_VERSION 35u
 /* AGX2 image-acquire binaries now include memory-to-texture visibility. */
 #define HK_AGX2_SHADER_BINARY_VERSION 36u
 
