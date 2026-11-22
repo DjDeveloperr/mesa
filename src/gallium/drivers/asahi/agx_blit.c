@@ -738,11 +738,11 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
 
          struct pipe_blit_info stencil = *info;
          stencil.src.resource = src->separate_stencil
-                                   ? &src->separate_stencil->base
+                                   ? &src->separate_stencil->base.b
                                    : info->src.resource;
          stencil.src.format = PIPE_FORMAT_R8_UINT;
          stencil.dst.resource = dst->separate_stencil
-                                   ? &dst->separate_stencil->base
+                                   ? &dst->separate_stencil->base.b
                                    : info->dst.resource;
          stencil.dst.format = PIPE_FORMAT_R8_UINT;
          stencil.mask = PIPE_MASK_R;
