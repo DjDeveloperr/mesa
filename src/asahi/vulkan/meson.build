@@ -1208,6 +1208,15 @@ if with_tests
     gnu_symbol_visibility : 'hidden',
   )
 
+  executable(
+    'vulkan-image-clear-bench',
+    files('tests/vulkan_image_clear_bench.c'),
+    include_directories : [inc_include],
+    dependencies : [cc.find_library('vulkan')],
+    c_args : [c_msvc_compat_args],
+    gnu_symbol_visibility : 'hidden',
+  )
+
 endif
 
 if with_tests
