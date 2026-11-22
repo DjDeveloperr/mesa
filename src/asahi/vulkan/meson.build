@@ -107,6 +107,7 @@ hk_files = files(
   'hk_execution_allowance.h',
   'hk_pack.c',
   'hk_pack.h',
+  'hk_partial_mrt_hsr.h',
   'hk_queue.c',
   'hk_queue.h',
   'hk_frame_anatomy.c',
@@ -150,6 +151,21 @@ if with_tests
         idep_libagx_shaders_h, idep_agx_pack,
         idep_vulkan_runtime_headers, idep_vulkan_util_headers,
       ]),
+    suite : ['asahi'])
+
+  test('hk_partial_mrt_hsr',
+    executable('hk_partial_mrt_hsr_test',
+      files('tests/test-hk-partial-mrt-hsr.c'),
+      include_directories : [
+        include_directories('.'), inc_gallium, inc_gallium_aux, inc_include,
+        inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm,
+      ],
+      dependencies : [
+        idep_nir, idep_mesautil, idep_libagx,
+        idep_libagx_shaders_h, idep_agx_pack,
+        idep_vulkan_runtime_headers, idep_vulkan_util_headers,
+      ],
+      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout]),
     suite : ['asahi'])
 
   test('hk_memory_budget', executable('hk_memory_budget_test',
