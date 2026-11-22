@@ -579,6 +579,7 @@ struct agx_batch {
    /* Only a loader-provided resolve may seed the multisample tile reload. */
    bool g17p_resolve_reload;
    bool g17p_resolve_preserve;
+   bool g17p_resolve_blit_attached;
 
    /* Set when a descriptor or state in this batch has no proven native
     * encoding on the current chip. Nothing from the batch may reach the
