@@ -742,6 +742,63 @@ int main(void)
    CHECK(!agx3_slot_assign(NULL, 1, 6, r));
    { struct agx3_slot_instr p=ld(0); CHECK(!agx3_slot_assign(&p,1,0,r)); CHECK(!agx3_slot_assign(&p,1,9,r)); }
 
+   /* Reader-list overflow (>64 distinct latched payload tokens across multiple
+    * slots): retiring one slot must leave another slot's readers live, and
+    * once all reader slots retire the fast path must resume cleanly. */
+   {
+      struct agx3_slot_instr p[16];
+      memset(p, 0, sizeof(p));
+      unsigned n = 0;
+      for (unsigned s = 0; s < 3; ++s) {
+         p[n].is_async = true;
+         p[n].latches_srcs = true;
+         p[n].preferred_slot = 1;
+         p[n].nr_srcs = 24;
+         for (unsigned k = 0; k < 24; ++k)
+            p[n].src[k] = (uint16_t)(s * 24 + k);
+         n++;
+      }
+      /* Slot 2 latches four distinct tokens beyond the 72 on slot 1. */
+      p[n].is_async = true;
+      p[n].latches_srcs = true;
+      p[n].preferred_slot = 2;
+      p[n].nr_srcs = 4;
+      for (unsigned k = 0; k < 4; ++k)
+         p[n].src[k] = (uint16_t)(100 + k);
+      n++;
+      p[n++] = mov(71);  /* retires slot 1 */
+      p[n++] = mov(0);   /* slot 1 already retired */
+      p[n++] = mov(103); /* slot 2 still active */
+      p[n++] = mov(100); /* slot 2 now retired */
+      /* Issue another latched store after full drain to verify reset. */
+      p[n++] = stdev(12);
+      p[n++] = mov(12);
+      p[n++] = mov(12);
+      CHECK(agx3_slot_assign(p, n, 6, r));
+      CHECK(r[4].wait_mask == 1);
+      CHECK(r[5].wait_mask == 0);
+      CHECK(r[6].wait_mask == 2);
+      CHECK(r[7].wait_mask == 0);
+      CHECK(r[8].slot == 1 && r[8].wait_mask == 0);
+      CHECK(r[9].wait_mask == 1);
+      CHECK(r[10].wait_mask == 0);
+   }
+
+   /* Writer-count tracking when all live results of a slot are overwritten
+    * synchronously: the slot becomes non-live for round-robin reuse even
+    * without an explicit wait on another instruction. */
+   {
+      struct agx3_slot_instr p[] = {
+         ld(0), ld(2), mov(0), ld(4), st(2), st(4),
+      };
+      CHECK(agx3_slot_assign(p, 6, 2, r));
+      CHECK(r[0].slot == 1 && r[1].slot == 2);
+      CHECK(r[2].wait_mask == 1); /* WAW retires slot 1 and clears reg 0 */
+      CHECK(r[3].slot == 1 && r[3].wait_mask == 0);
+      CHECK(r[4].wait_mask == 2);
+      CHECK(r[5].wait_mask == 1);
+   }
+
    if (failures){ fprintf(stderr,"agx3_slot_core: %u/%u failed\n",failures,checks); return 1; }
    printf("agx3_slot_core: all %u checks passed\n", checks);
    return 0;

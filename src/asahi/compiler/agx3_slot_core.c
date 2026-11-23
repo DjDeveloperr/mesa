@@ -7,17 +7,82 @@
 
 #include <string.h>
 
-/* Whether a register still belongs to this generation, as result or payload. */
-static bool
-agx3_slot_generation_live(const uint8_t *reg_slot,
-                          const uint16_t *reader_slots, unsigned slot,
-                          unsigned token_count)
+/* Active writer slot for token r, or 0 if retired or synchronously written. */
+static inline uint8_t
+slot_reg_current(const uint8_t *reg_slot, const uint16_t *reg_gen,
+                 const uint16_t *slot_gen, uint16_t r)
 {
-   for (unsigned r = 0; r < token_count; ++r) {
-      if (reg_slot[r] == slot || (reader_slots[r] & (1u << (slot - 1))))
-         return true;
+   const uint8_t s = reg_slot[r];
+   return (s && reg_gen[r] == slot_gen[s]) ? s : 0;
+}
+
+static inline void
+slot_clear_writer(uint8_t *reg_slot, const uint16_t *reg_gen,
+                  const uint16_t *slot_gen, unsigned *slot_writer_count,
+                  uint16_t r)
+{
+   const uint8_t s = reg_slot[r];
+   if (s) {
+      if (reg_gen[r] == slot_gen[s])
+         slot_writer_count[s]--;
+      reg_slot[r] = 0;
    }
-   return false;
+}
+
+static inline void
+slot_set_writer(uint8_t *reg_slot, uint16_t *reg_gen,
+                const uint16_t *slot_gen, unsigned *slot_writer_count,
+                uint16_t r, uint8_t slot)
+{
+   slot_clear_writer(reg_slot, reg_gen, slot_gen, slot_writer_count, r);
+   reg_slot[r] = slot;
+   reg_gen[r] = slot_gen[slot];
+   slot_writer_count[slot]++;
+}
+
+static void
+slot_retire_writers(uint8_t *reg_slot, uint16_t *slot_gen,
+                    unsigned *slot_writer_count, unsigned slot,
+                    unsigned token_count)
+{
+   slot_writer_count[slot] = 0;
+   if (++slot_gen[slot] == 0) {
+      /* Wraparound guard after 65,535 generations on one slot. */
+      for (unsigned r = 0; r < token_count; ++r) {
+         if (reg_slot[r] == slot)
+            reg_slot[r] = 0;
+      }
+      slot_gen[slot] = 1;
+   }
+}
+
+static void
+slot_retire_readers(uint16_t *reader_slots, uint16_t *reader_list,
+                    unsigned *reader_list_n, bool *reader_list_overflow,
+                    uint16_t *active_reader_slots, uint16_t wait_mask,
+                    unsigned token_count)
+{
+   if (!(wait_mask & *active_reader_slots))
+      return;
+
+   *active_reader_slots &= (uint16_t)~wait_mask;
+   if (!*reader_list_overflow) {
+      unsigned dst = 0;
+      for (unsigned k = 0; k < *reader_list_n; ++k) {
+         const uint16_t r = reader_list[k];
+         reader_slots[r] &= (uint16_t)~wait_mask;
+         if (reader_slots[r])
+            reader_list[dst++] = r;
+      }
+      *reader_list_n = dst;
+   } else {
+      for (unsigned r = 0; r < token_count; ++r)
+         reader_slots[r] &= (uint16_t)~wait_mask;
+      if (*active_reader_slots == 0) {
+         *reader_list_n = 0;
+         *reader_list_overflow = false;
+      }
+   }
 }
 
 /* Most regions touch only GPRs. Do not scan the entire static TPS address
@@ -84,16 +149,20 @@ agx3_slot_assign_initial(const struct agx3_slot_instr *instrs, unsigned n,
    }
 
    /* reg_slot[r] = slot (1..nslots) of the async op whose result currently
-    * lives in half-register r, or 0 if r was last written by a synchronous op
-    * (or never). */
+    * lives in half-register r, valid iff reg_gen[r] == slot_gen[reg_slot[r]],
+    * or 0 if r was last written by a synchronous op (or never). */
    uint8_t reg_slot[AGX3_SLOT_NUM_TOKENS];
+   uint16_t reg_gen[AGX3_SLOT_NUM_TOKENS];
+   uint16_t slot_gen[9] = {0, 1, 1, 1, 1, 1, 1, 1, 1};
+   unsigned slot_writer_count[9] = {0};
    memset(reg_slot, 0, token_count * sizeof(reg_slot[0]));
    uint16_t pending = 0;
    for (unsigned i = 0; i < entry_count; ++i) {
       /* One token cannot name two independently pending generations. */
       if (reg_slot[entry[i].token])
          return false;
-      reg_slot[entry[i].token] = entry[i].slot;
+      slot_set_writer(reg_slot, reg_gen, slot_gen, slot_writer_count,
+                      entry[i].token, entry[i].slot);
       pending |= (uint16_t)(1u << (entry[i].slot - 1));
    }
    for (unsigned i = 0; i < live_count; ++i) {
@@ -101,7 +170,8 @@ agx3_slot_assign_initial(const struct agx3_slot_instr *instrs, unsigned n,
       for (unsigned r = range->first; r < range->first + range->count; ++r) {
          if (reg_slot[r])
             return false;
-         reg_slot[r] = range->slot;
+         slot_set_writer(reg_slot, reg_gen, slot_gen, slot_writer_count, r,
+                         range->slot);
       }
       pending |= (uint16_t)(1u << (range->slot - 1));
    }
@@ -111,8 +181,16 @@ agx3_slot_assign_initial(const struct agx3_slot_instr *instrs, unsigned n,
     * half-register r as payload. A store has no destination, so the result
     * bookkeeping above never covers its payload: the transform feedback copy
     * program reuses one payload quad for all sixteen captured varyings, and
-    * the next varying's setup raced the outstanding store. */
+    * the next varying's setup raced the outstanding store.
+    *
+    * reader_list tracks the tokens with nonzero reader_slots[r] so retiring
+    * slots does not scan token_count; if more than 64 distinct tokens are
+    * latched simultaneously, retirement falls back to a full scan until all
+    * active reader slots clear. */
    uint16_t reader_slots[AGX3_SLOT_NUM_TOKENS];
+   uint16_t reader_list[64];
+   unsigned reader_list_n = 0;
+   bool reader_list_overflow = false;
    memset(reader_slots, 0, token_count * sizeof(reader_slots[0]));
    uint16_t active_reader_slots = 0;
 
@@ -159,7 +237,7 @@ agx3_slot_assign_initial(const struct agx3_slot_instr *instrs, unsigned n,
          const uint16_t r = I->src[s];
          if (r >= AGX3_SLOT_NUM_TOKENS)
             return false;
-         const uint8_t slot = reg_slot[r];
+         const uint8_t slot = slot_reg_current(reg_slot, reg_gen, slot_gen, r);
          if (slot != 0 && !slot_waited[slot]) {
             wait_mask |= (uint16_t)(1u << (slot - 1));
             slot_waited[slot] = true;
@@ -182,7 +260,7 @@ agx3_slot_assign_initial(const struct agx3_slot_instr *instrs, unsigned n,
          const uint16_t r = I->dst[d];
          if (r >= AGX3_SLOT_NUM_TOKENS)
             return false;
-         const uint8_t slot = reg_slot[r];
+         const uint8_t slot = slot_reg_current(reg_slot, reg_gen, slot_gen, r);
          if (slot != 0 && !slot_waited[slot]) {
             wait_mask |= (uint16_t)(1u << (slot - 1));
             slot_waited[slot] = true;
@@ -213,14 +291,11 @@ agx3_slot_assign_initial(const struct agx3_slot_instr *instrs, unsigned n,
          if (!(I->transient_slots & bit))
             continue;
 
-         bool live = false;
-         for (unsigned r = 0; r < token_count; ++r) {
-            live |= (reader_slots[r] & bit) != 0;
-            if (reg_slot[r] == slot) {
-               live = true;
-               reg_slot[r] = 0;
-            }
-         }
+         const bool live = slot_writer_count[slot] != 0 ||
+                           (active_reader_slots & bit) != 0;
+         if (slot_writer_count[slot] != 0)
+            slot_retire_writers(reg_slot, slot_gen, slot_writer_count, slot,
+                                token_count);
          if (live && !slot_waited[slot])
             wait_mask |= bit;
          slot_waited[slot] = true;
@@ -229,11 +304,9 @@ agx3_slot_assign_initial(const struct agx3_slot_instr *instrs, unsigned n,
 
       /* Every slot this instruction waited is now retired, so the registers
        * its async ops were reading are free again. */
-      if (wait_mask & active_reader_slots) {
-         for (unsigned r = 0; r < token_count; ++r)
-            reader_slots[r] &= (uint16_t)~wait_mask;
-         active_reader_slots &= (uint16_t)~wait_mask;
-      }
+      slot_retire_readers(reader_slots, reader_list, &reader_list_n,
+                          &reader_list_overflow, &active_reader_slots,
+                          wait_mask, token_count);
 
       if (I->is_async) {
          /*
@@ -257,7 +330,8 @@ agx3_slot_assign_initial(const struct agx3_slot_instr *instrs, unsigned n,
          if (!slot) {
             if (I->coalesce_src) {
                const unsigned source = I->src[I->coalesce_src - 1];
-               const uint8_t producer_slot = reg_slot[source];
+               const uint8_t producer_slot =
+                  slot_reg_current(reg_slot, reg_gen, slot_gen, source);
                if (producer_slot && producer_slot <= cap &&
                    slot_waited[producer_slot] &&
                    !(I->transient_slots & (1u << (producer_slot - 1))))
@@ -276,9 +350,10 @@ agx3_slot_assign_initial(const struct agx3_slot_instr *instrs, unsigned n,
                const uint8_t candidate = (uint8_t)((next + t) % nslots + 1);
                if (candidate > cap)
                   continue;
+               const uint16_t cbit = (uint16_t)(1u << (candidate - 1));
                if (slot_waited[candidate] ||
-                   !agx3_slot_generation_live(reg_slot, reader_slots, candidate,
-                                             token_count) ||
+                   (slot_writer_count[candidate] == 0 &&
+                    !(active_reader_slots & cbit)) ||
                    (I->reissues_live_slot && slot_reissuable[candidate]) ||
                    (I->join_class && slot_join_class[candidate] == I->join_class &&
                     slot_join_count[candidate] < I->join_limit))
@@ -322,11 +397,9 @@ agx3_slot_assign_initial(const struct agx3_slot_instr *instrs, unsigned n,
 
          /* Allocation can add a wait when every generation is occupied.
           * Retire its payload readers before recording this instruction. */
-         if (wait_mask & active_reader_slots) {
-            for (unsigned r = 0; r < token_count; ++r)
-               reader_slots[r] &= (uint16_t)~wait_mask;
-            active_reader_slots &= (uint16_t)~wait_mask;
-         }
+         slot_retire_readers(reader_slots, reader_list, &reader_list_n,
+                             &reader_list_overflow, &active_reader_slots,
+                             wait_mask, token_count);
 
          /* Reusing an already-synchronized slot starts a new dependency
           * generation. Retire the old generation's register aliases before
@@ -334,11 +407,9 @@ agx3_slot_assign_initial(const struct agx3_slot_instr *instrs, unsigned n,
           * consume the new generation's wait and hide it from its consumer. */
          const bool new_join = slot_waited[slot] ||
                                slot_join_class[slot] != I->join_class;
-         if (slot_waited[slot]) {
-            for (unsigned r = 0; r < token_count; ++r) {
-               if (reg_slot[r] == slot)
-                  reg_slot[r] = 0;
-            }
+         if (slot_waited[slot] && slot_writer_count[slot] != 0) {
+            slot_retire_writers(reg_slot, slot_gen, slot_writer_count, slot,
+                                token_count);
          }
          slot_waited[slot] = false; /* freshly outstanding */
          slot_reissuable[slot] = I->reissues_live_slot;
@@ -348,13 +419,24 @@ agx3_slot_assign_initial(const struct agx3_slot_instr *instrs, unsigned n,
          for (unsigned d = 0; d < I->nr_dsts; ++d) {
             if (I->dst[d] >= AGX3_SLOT_NUM_TOKENS)
                return false;
-            reg_slot[I->dst[d]] = slot;
+            slot_set_writer(reg_slot, reg_gen, slot_gen, slot_writer_count,
+                            I->dst[d], slot);
          }
          if ((I->latches_srcs || I->late_src_mask) && I->nr_srcs) {
-            active_reader_slots |= (uint16_t)(1u << (slot - 1));
+            const uint16_t bit = (uint16_t)(1u << (slot - 1));
+            active_reader_slots |= bit;
             for (unsigned s = 0; s < I->nr_srcs; ++s) {
-               if (I->latches_srcs || (I->late_src_mask & (UINT32_C(1) << s)))
-                  reader_slots[I->src[s]] |= (uint16_t)(1u << (slot - 1));
+               if (I->latches_srcs || (I->late_src_mask & (UINT32_C(1) << s))) {
+                  const uint16_t r = I->src[s];
+                  if (reader_slots[r] == 0) {
+                     if (reader_list_n <
+                         sizeof(reader_list) / sizeof(reader_list[0]))
+                        reader_list[reader_list_n++] = r;
+                     else
+                        reader_list_overflow = true;
+                  }
+                  reader_slots[r] |= bit;
+               }
             }
          }
       } else {
@@ -365,7 +447,8 @@ agx3_slot_assign_initial(const struct agx3_slot_instr *instrs, unsigned n,
          for (unsigned d = 0; d < I->nr_dsts; ++d) {
             if (I->dst[d] >= AGX3_SLOT_NUM_TOKENS)
                return false;
-            reg_slot[I->dst[d]] = 0; /* synchronous result, no wait needed */
+            slot_clear_writer(reg_slot, reg_gen, slot_gen, slot_writer_count,
+                              I->dst[d]);
          }
       }
    }
