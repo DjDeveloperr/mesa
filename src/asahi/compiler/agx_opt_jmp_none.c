@@ -24,12 +24,11 @@
  * ubershaders. It needs to be retuned in lockstep with changes to the cost
  * estimation heuristic.
  *
- * On G17P a group with every lane off still spends a cycle per instruction, so
- * TF3's short light paths pay for the jump: 5 is 4-6% faster than 19 there, and
- * 10, 5 and 2 are alike.
+ * On AGX3 a group with every lane off still spends a cycle per instruction, so
+ * short divergent arms pay for the forward jump sooner than on AGX2.
  */
 #define COST_JMP (19)
-#define COST_JMP_G17P (5)
+#define COST_JMP_AGX3 (5)
 
 static uint32_t
 cost_instr(agx_instr *I)
@@ -151,7 +150,7 @@ try_insert_jmp(agx_context *ctx, agx_block *from, agx_instr *from_I,
       cost_between(ctx, from, from_I, target, skip_to_end_of_target, &must_skip);
 
    const uint32_t cost_jmp =
-      ctx->key->dev.chip == AGX_CHIP_G17P ? COST_JMP_G17P : COST_JMP;
+      agx_isa_is_agx3(ctx->key->dev.encoding) ? COST_JMP_AGX3 : COST_JMP;
    if (!must_skip && cost_instructions < cost_jmp * inverse_probability)
       return;
 
