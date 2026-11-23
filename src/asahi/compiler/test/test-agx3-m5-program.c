@@ -337,18 +337,18 @@ test_m5_dispatch(enum agx_chip chip)
  * it writes into the single-kick slot from a kernel's template. */
 static void
 select_launch_model(const uint32_t tmpl[11], bool run, uint32_t groups_x,
-                    uint32_t height, uint32_t depth, unsigned log2,
+                    uint32_t groups_y, uint32_t depth, unsigned log2,
                     uint32_t out[11])
 {
    uint32_t word0 = tmpl[0];
-   if (!run || (height < 2 && depth < 2))
+   if (!run || (groups_y < 2 && depth < 2))
       word0 &= 0xfff1ffffu;
    out[0] = word0;
    out[1] = tmpl[1];
    out[2] = tmpl[2];
    out[3] = tmpl[3];
    out[4] = run ? groups_x << log2 : 0;
-   out[5] = run ? height : 0;
+   out[5] = run ? groups_y : 0;
    out[6] = run ? depth : 0;
    out[7] = run ? tmpl[7] : 0;
    out[8] = run ? tmpl[8] : 0;
@@ -385,19 +385,21 @@ test_m5_single_kick_launch(enum agx_chip chip)
 
       const uint32_t dims[][3] = {
          {1, 1, 1}, {31, 1, 1}, {32, 1, 1}, {33, 1, 1}, {1920, 1080, 1},
-         {64, 1, 7}, {5, 3, 2}, {2976, 1872, 1},
+         {64, 1, 7}, {5, 3, 1}, {5, 3, 2}, {2976, 1872, 1},
       };
       for (unsigned i = 0; i < ARRAY_SIZE(dims); ++i) {
          const uint32_t w = dims[i][0], h = dims[i][1], d = dims[i][2];
-         const uint32_t groups_x = (w >> 5) + ((w & 31) ? 1 : 0);
+         const uint32_t groups_x = h > 1 ? ((w >> 3) + ((w & 7) ? 1 : 0))
+                                         : ((w >> 5) + ((w & 31) ? 1 : 0));
+         const uint32_t groups_y = h > 1 ? ((h >> 2) + ((h & 3) ? 1 : 0)) : h;
          uint32_t model[11];
-         select_launch_model(tmpl, true, groups_x, h, d, 5, model);
+         select_launch_model(tmpl, true, groups_x, groups_y, d, 5, model);
 
          /* hk_dispatch_m5_native's direct record for the same launch. */
          const struct agx3_compute_direct_grid grid = {
             .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
-            .size = {groups_x * 32, h, d}, .local_size = {32, 1, 1},
-            .dimensions = d != 1 ? 3 : h != 1 ? 2 : 1,
+            .size = {groups_x * 32, groups_y, d}, .local_size = {32, 1, 1},
+            .dimensions = d != 1 ? 3 : groups_y != 1 ? 2 : 1,
          };
          uint32_t host[11];
          sink = (struct agx3_compute_dispatch_sink){
