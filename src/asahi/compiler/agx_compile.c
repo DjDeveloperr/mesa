@@ -11049,12 +11049,13 @@ pre_preamble:
       move_all &= ~(nir_move_load_input | nir_move_load_frag_coord |
                     nir_move_alu);
 
-   /* Sinking a G17P buffer load into the arm that reads it saves the load when
+   /* Sinking a buffer load into the arm that reads it saves the load when
     * the arm is skipped. Sink leaves it at the top of that block; moving it on
     * to its use would make each load wait alone instead of overlapping.
     */
+   const bool sink_ssbo = g17p || (m5 && !g18_scans);
    NIR_PASS(_, nir, nir_opt_sink,
-            g17p ? move_all : move_all & ~nir_move_load_ssbo);
+            sink_ssbo ? move_all : move_all & ~nir_move_load_ssbo);
    NIR_PASS(_, nir, nir_opt_move, move_all & ~nir_move_load_ssbo);
    NIR_PASS(progress, nir, nir_lower_all_phis_to_scalar);
 
@@ -14352,10 +14353,10 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p, bool native_fragment_dep
       }
       NIR_PASS(_, nir, nir_lower_frexp);
    }
-   /* Before nir_lower_alu's generic lower_fminmax_signed_zero. Validated on
-    * G17P only (`g17p` above means any native AGX3 chip); other chips keep
-    * the generic lowering. The flush policy is agx_nir_lower_fminmax's. */
-   if (chip_g17p) {
+   /* Before nir_lower_alu's generic lower_fminmax_signed_zero. Enabled for
+    * G17P and M5 (AGX3C); other chips keep the generic lowering. The flush
+    * policy is agx_nir_lower_fminmax's. */
+   if (chip_g17p || m5) {
       /* DXVK and vkd3d-proton mark every float op signed-zero preserving.
        * Drop the flag where no use can tell -0 from +0, before the min/max
        * lowering pays for it. */
@@ -16806,11 +16807,14 @@ agx_compile_shader_nir_internal(nir_shader *nir, struct agx_shader_key *key,
          NIR_PASS(_, nir, nir_opt_dce);
       /* The launch's copies, if any, sit above every export. */
       unsigned push_count = info->push_count;
+      const bool place_load_bases_low =
+         is_g17p ||
+         (key->dev.encoding == AGX_ISA_ENCODING_AGX3C && !key->dev.emit_agx3d);
       NIR_PASS(post_opt_progress, nir, agx_nir_place_preamble_handles_low,
                key->reserved_preamble,
                info->agx3_uniform_dma_count ? info->agx3_uniform_dma[0].dest
                                             : push_count,
-               &push_count, is_g17p);
+               &push_count, place_load_bases_low);
       info->push_count = push_count;
    }
 

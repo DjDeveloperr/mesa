@@ -7491,3 +7491,83 @@ TEST(NativeForms, M5FenceMemToTexUsesNonRendezvousFences)
    free(part.binary);
    ralloc_free(b.shader);
 }
+
+TEST(NativeForms, AGX3CPreprocessLowersSignedZeroFminmax)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "agx3c signed-zero fminmax");
+   b.shader->info.workgroup_size[0] = 32;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *base = nir_load_preamble(&b, 1, 64, .base = 0);
+   nir_def *idx = nir_load_local_invocation_index(&b);
+   nir_def *addr = nir_iadd(&b, base, nir_u2u64(&b, nir_ishl_imm(&b, idx, 2)));
+   nir_def *x = nir_load_global(&b, 1, 32, addr, .align_mul = 4);
+   b.fp_math_ctrl = nir_fp_preserve_sz_inf_nan;
+   nir_def *clamped = nir_fmax(&b, x, nir_imm_float(&b, -1.0f));
+   nir_store_global(&b, clamped, addr, .align_mul = 4);
+
+   agx_preprocess_nir_m5(b.shader);
+
+   unsigned fmax_agx = 0, bcsel = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_alu)
+            continue;
+         nir_op op = nir_instr_as_alu(instr)->op;
+         fmax_agx += (op == nir_op_fmax_agx);
+         bcsel += (op == nir_op_bcsel);
+      }
+   }
+   EXPECT_EQ(fmax_agx, 1u);
+   EXPECT_EQ(bcsel, 0u);
+
+   agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+   key.dev.chip = AGX_CHIP_G17S;
+   key.no_preamble = true;
+   key.reserved_preamble = 8;
+   agx_shader_part part = {};
+   ASSERT_TRUE(agx_compile_shader_nir(b.shader, &key, &part));
+   ASSERT_NE(part.binary, nullptr);
+
+   free(part.binary);
+   ralloc_free(b.shader);
+}
+
+TEST(NativeForms, AGX3CCompilePlacesPreambleLoadBasesLowAndSinksSsbo)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "agx3c preamble base and sink");
+   b.shader->info.workgroup_size[0] = 32;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *table = nir_load_preamble(&b, 1, 64, .base = 0);
+   nir_def *base = nir_load_global_constant(&b, 1, 64, table, .align_mul = 8);
+   nir_def *idx = nir_load_local_invocation_index(&b);
+   nir_def *val = nir_load_constant_agx(
+      &b, 1, 32, base, idx, .access = ACCESS_CAN_REORDER, .base = 2,
+      .format = PIPE_FORMAT_R32_UINT);
+   nir_def *out_addr =
+      nir_iadd(&b, table, nir_u2u64(&b, nir_ishl_imm(&b, idx, 2)));
+   nir_if *nif = nir_push_if(&b, nir_ult_imm(&b, idx, 16));
+   {
+      nir_store_global(&b, val, out_addr, .align_mul = 4);
+   }
+   nir_pop_if(&b, nif);
+
+   agx_preprocess_nir_m5(b.shader);
+
+   agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+   key.dev.chip = AGX_CHIP_G17S;
+   key.reserved_preamble = 8;
+   agx_shader_part part = {};
+   ASSERT_TRUE(agx_compile_shader_nir(b.shader, &key, &part));
+   ASSERT_NE(part.binary, nullptr);
+
+   free(part.binary);
+   ralloc_free(b.shader);
+}
