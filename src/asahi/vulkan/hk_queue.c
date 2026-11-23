@@ -529,18 +529,32 @@ max_commands_per_submit(struct hk_device *dev)
 
 static VkResult
 queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
-                    unsigned ring_idx, struct hk_cmd_pending *pending)
+                    unsigned ring_idx, struct hk_cmd_pending *pending,
+                    bool syncs_has_spare)
 {
    /* Give each ioctl an independent binary completion fence. API signals
     * may be signalled on the CPU during error unwinding; timeline lookup
     * can prune a completed error fence. Neither is a safe retirement token. */
    struct drm_asahi_submit pinned = *submit;
+   struct drm_asahi_sync syncs_stack[16];
+   struct drm_asahi_sync *syncs_heap = NULL;
    if (pending) {
       const unsigned count = submit->in_sync_count + submit->out_sync_count;
-      struct drm_asahi_sync *syncs =
-         alloca((count + 1) * sizeof(*syncs));
-      if (count)
-         memcpy(syncs, (void *)(uintptr_t)submit->syncs, count * sizeof(*syncs));
+      struct drm_asahi_sync *syncs;
+      if (syncs_has_spare) {
+         syncs = (struct drm_asahi_sync *)(uintptr_t)submit->syncs;
+      } else {
+         if (count + 1 <= ARRAY_SIZE(syncs_stack)) {
+            syncs = syncs_stack;
+         } else {
+            syncs_heap = malloc((size_t)(count + 1) * sizeof(*syncs));
+            if (!syncs_heap)
+               return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+            syncs = syncs_heap;
+         }
+         if (count)
+            memcpy(syncs, (void *)(uintptr_t)submit->syncs, count * sizeof(*syncs));
+      }
       syncs[count] = (struct drm_asahi_sync) {
          .sync_type = DRM_ASAHI_SYNC_SYNCOBJ,
          .handle = hk_cmd_pending_signal(pending),
@@ -567,6 +581,7 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
 
    if (dev->dev.is_virtio)
       u_rwlock_rdunlock(&dev->external_bos.lock);
+   free(syncs_heap);
 
    if (ret) {
       /* ASAHI_MESA_DEBUG=trace decodes every command stream before it is
@@ -709,7 +724,7 @@ queue_submit_looped(struct hk_device *dev, struct hk_queue *queue,
 
       if (chunk_timelines)
          last_attempted_point = chunk_signal->timeline_value;
-      VkResult result = queue_submit_single(dev, &submit_ioctl, ring_idx, pending);
+      VkResult result = queue_submit_single(dev, &submit_ioctl, ring_idx, pending, false);
       if (result != VK_SUCCESS) {
          if (chunk_timelines)
             queue->drm.timeline_value = last_attempted_point;
@@ -1308,7 +1323,7 @@ hk_queue_ensure_drm(struct hk_device *dev, struct hk_queue *queue,
                           "Waiting for the replaced kernel queue failed: %s",
                           strerror(errno));
       agx_destroy_command_queue(&dev->dev, queue->drm.id);
-      queue->drm.id = UINT32_MAX;
+      p_atomic_set(&queue->drm.id, UINT32_MAX);
    }
 
    /* M5 and G17P admit GPU work at the API entrypoint, before semaphore
@@ -1322,7 +1337,7 @@ hk_queue_ensure_drm(struct hk_device *dev, struct hk_queue *queue,
       &dev->dev, (enum drm_asahi_priority)(queue->drm.virt_ring_idx - 1), layouts);
    if (id != UINT32_MAX) {
       *replaced = had_queue;
-      queue->drm.id = id;
+      p_atomic_set(&queue->drm.id, id);
       queue->drm.render_rq = render_rq;
       return VK_SUCCESS;
    }
@@ -1426,25 +1441,30 @@ hk_QueueSubmit2(VkQueue _queue, uint32_t submitCount,
       if (vk_device_is_lost(&dev->vk))
          return VK_ERROR_DEVICE_LOST;
 
-      const bool rq_capable =
-         dev->gen1_native_graphics_rq || dev->gen1_native_fragment_rq;
-      bool needs_queue = false;
-      unsigned render_rq = 0;
-      for (uint32_t i = 0; i < submitCount; i++) {
-         for (uint32_t j = 0; j < pSubmits[i].commandBufferInfoCount; j++) {
-            VK_FROM_HANDLE(hk_cmd_buffer, cmd,
-                           pSubmits[i].pCommandBufferInfos[j].commandBuffer);
-            if (list_is_empty(&cmd->control_streams))
-               continue;
-            needs_queue = true;
-            if (rq_capable)
-               render_rq |= hk_cmd_buffer_needs_render_rq(cmd);
+      struct hk_queue *real = queue->vk.real_queue
+         ? container_of(queue->vk.real_queue, struct hk_queue, vk)
+         : queue;
+      if (unlikely(p_atomic_read(&real->drm.id) == UINT32_MAX)) {
+         const bool rq_capable =
+            dev->gen1_native_graphics_rq || dev->gen1_native_fragment_rq;
+         bool needs_queue = false;
+         unsigned render_rq = 0;
+         for (uint32_t i = 0; i < submitCount; i++) {
+            for (uint32_t j = 0; j < pSubmits[i].commandBufferInfoCount; j++) {
+               VK_FROM_HANDLE(hk_cmd_buffer, cmd,
+                              pSubmits[i].pCommandBufferInfos[j].commandBuffer);
+               if (list_is_empty(&cmd->control_streams))
+                  continue;
+               needs_queue = true;
+               if (rq_capable)
+                  render_rq |= hk_cmd_buffer_needs_render_rq(cmd);
+            }
          }
-      }
-      if (needs_queue) {
-         VkResult result = hk_queue_admit(queue, render_rq);
-         if (result != VK_SUCCESS)
-            return result;
+         if (needs_queue) {
+            VkResult result = hk_queue_admit(queue, render_rq);
+            if (result != VK_SUCCESS)
+               return result;
+         }
       }
    }
 
@@ -1466,12 +1486,17 @@ hk_QueueBindSparse(VkQueue _queue, uint32_t bindInfoCount,
       /* Sparse image changes may require a GPU maintenance command. Reserve
        * its queue before any bind or semaphore operation in this API call.
        */
-      for (uint32_t i = 0; i < bindInfoCount; i++) {
-         if (pBindInfo[i].imageOpaqueBindCount || pBindInfo[i].imageBindCount) {
-            VkResult result = hk_queue_admit(queue, 0);
-            if (result != VK_SUCCESS)
-               return result;
-            break;
+      struct hk_queue *real = queue->vk.real_queue
+         ? container_of(queue->vk.real_queue, struct hk_queue, vk)
+         : queue;
+      if (unlikely(p_atomic_read(&real->drm.id) == UINT32_MAX)) {
+         for (uint32_t i = 0; i < bindInfoCount; i++) {
+            if (pBindInfo[i].imageOpaqueBindCount || pBindInfo[i].imageBindCount) {
+               VkResult result = hk_queue_admit(queue, 0);
+               if (result != VK_SUCCESS)
+                  return result;
+               break;
+            }
          }
       }
    }
@@ -1716,12 +1741,22 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
       hk_cmd_pending_end(dev, pending, queue, VK_ERROR_DEVICE_LOST);
       return vk_device_set_lost(&dev->vk, "Asahi queue timeline overflow");
    }
+   const size_t max_syncs =
+      (size_t)submit->wait_count + kernel_signal_count + 3 + (pending ? 1 : 0);
+   struct drm_asahi_sync syncs_stack[16];
+   struct drm_asahi_sync *syncs_heap = NULL;
+   struct drm_asahi_sync *syncs = syncs_stack;
+   if (unlikely(max_syncs > ARRAY_SIZE(syncs_stack))) {
+      syncs_heap = malloc(max_syncs * sizeof(*syncs));
+      if (!syncs_heap) {
+         hk_cmd_pending_end(dev, pending, queue, VK_ERROR_OUT_OF_HOST_MEMORY);
+         return vk_error(queue, VK_ERROR_OUT_OF_HOST_MEMORY);
+      }
+      syncs = syncs_heap;
+   }
    const uint64_t first_chunk_point = queue->drm.timeline_value + 1;
    queue->drm.timeline_value += point_count;
    unsigned wait_count = 0;
-   struct drm_asahi_sync *syncs =
-      alloca((submit->wait_count + kernel_signal_count + 3) *
-             sizeof(struct drm_asahi_sync));
 
    /* At most one wait on the queue's own timeline: the kernel refuses two
     * points of one timeline in a submission. own_wait is its index. */
@@ -1758,7 +1793,8 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
        * XXX: This is quadratic time.
        */
       bool skip = false;
-      if (submit->waits[i].sync->flags & VK_SYNC_IS_TIMELINE) {
+      if (submit->wait_count > 1 &&
+          (submit->waits[i].sync->flags & VK_SYNC_IS_TIMELINE)) {
          const uint64_t v1 = submit->waits[i].wait_value;
          for (unsigned j = 0; j < submit->wait_count; ++j) {
             const uint64_t v2 = submit->waits[j].wait_value;
@@ -1841,7 +1877,8 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
     * util_dynarray moves to the heap if attachments or more commands need
     * additional space. The ioctl consumes the payload before we return.
     */
-   util_dynarray_init_from_stack(&payload, alloca(1024), 1024);
+   uint8_t payload_stack[4096];
+   util_dynarray_init_from_stack(&payload, payload_stack, sizeof(payload_stack));
 
    unsigned nr_vdm = 0, nr_cdm = 0;
 
@@ -1907,6 +1944,7 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
                             DRM_ASAHI_FEATURE_PER_COMMAND_INPUT_SYNCS),
                           completed, queue->sync_resolved.data)) {
       util_dynarray_fini(&payload);
+      free(syncs_heap);
       if (unlikely(anatomy))
          hk_frame_anatomy_end_submit(anatomy, dev, queue, VK_ERROR_DEVICE_LOST);
       hk_cmd_pending_end(dev, pending, queue, VK_ERROR_DEVICE_LOST);
@@ -1988,6 +2026,7 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
              !hk_drm_serialize_prefix(&header, command_prior, nr_vdm, nr_cdm,
                                        prior_base, queue->sync.exact_prior)) {
             util_dynarray_fini(&payload);
+            free(syncs_heap);
             hk_cmd_pending_end(dev, pending, queue, VK_ERROR_DEVICE_LOST);
             return vk_device_set_lost(&dev->vk,
                                       "Asahi serialization ordinal overflow");
@@ -2025,6 +2064,7 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
                /* The header size is 16 bits; never let it truncate. */
                if (cs->compute_resources.size > UINT16_MAX) {
                   util_dynarray_fini(&payload);
+                  free(syncs_heap);
                   if (unlikely(anatomy))
                      hk_frame_anatomy_end_submit(anatomy, dev, queue,
                                                  VK_ERROR_DEVICE_LOST);
@@ -2120,6 +2160,7 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
                /* The header size is 16 bits; never let it truncate. */
                if (cs->render_resources.size + tile_bytes > UINT16_MAX) {
                   util_dynarray_fini(&payload);
+                  free(syncs_heap);
                   if (unlikely(anatomy))
                      hk_frame_anatomy_end_submit(anatomy, dev, queue,
                                                  VK_ERROR_DEVICE_LOST);
@@ -2353,7 +2394,8 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
       if (unlikely(anatomy))
          hk_frame_anatomy_note_barriers(anatomy, payload.data, 0, payload.size);
       result =
-         queue_submit_single(dev, &submit_ioctl, queue->drm.virt_ring_idx, pending);
+         queue_submit_single(dev, &submit_ioctl, queue->drm.virt_ring_idx, pending,
+                             true);
    } else {
       result = queue_submit_looped(dev, queue, &submit_ioctl, command_count,
                                    queue->drm.virt_ring_idx, kq_base,
@@ -2379,6 +2421,7 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
    }
 
    util_dynarray_fini(&payload);
+   free(syncs_heap);
 
    if (unlikely(anatomy))
       hk_frame_anatomy_end_submit(anatomy, dev, queue, result);

@@ -1310,6 +1310,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    simple_mtx_init(&dev->cmd_pending_lock, mtx_plain);
    list_inithead(&dev->cmd_pending_queues);
    list_inithead(&dev->cmd_pending_failed);
+   list_inithead(&dev->cmd_pending_pool);
    dev->cmd_pending_ready = true;
    hk_query_stamps_init(dev);
    simple_mtx_init(&dev->vdm.lock, mtx_plain);

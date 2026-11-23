@@ -531,10 +531,16 @@ struct hk_cmd_pending {
     * polling the others. Polling holds cmd_pending_lock. A syncobj may be
     * reused from an earlier submission: a successful ioctl replaces its
     * fence, so only submissions whose ioctls all succeeded are polled.
+    * Single-chunk submissions store their handle/state inline to avoid
+    * a second heap allocation.
     */
    uint32_t *signals;
    uint32_t *unknown;
    bool *succeeded;
+   uint32_t inline_signal;
+   uint32_t inline_unknown;
+   bool inline_succeeded;
+   bool pooled;
    unsigned chunks, attempted;
 
    /* The queue timeline point its last ioctl signals. */
@@ -545,21 +551,22 @@ struct hk_cmd_pending {
 };
 
 static void
-hk_cmd_add_pin(struct hk_cmd_pin *pins, size_t *count,
+hk_cmd_add_pin(struct hk_cmd_pin *pins, size_t *count, size_t cap,
                enum hk_cmd_pin_kind kind, void *object)
 {
-   if (pins)
+   if (pins && *count < cap)
       pins[*count] = (struct hk_cmd_pin){kind, object};
    ++*count;
 }
 
-/* Count first, then fill a preallocated array. No fallible allocation may
- * happen after acquiring only a subset of the references. Repeated command
- * buffers are intentional: each occurrence gets balanced references.
+/* Count and opportunistically fill up to `cap` entries in a single walk.
+ * No fallible allocation may happen after acquiring only a subset of the
+ * references. Repeated command buffers are intentional: each occurrence
+ * gets balanced references.
  */
 static size_t
 hk_cmd_collect_pins(const struct vk_queue_submit *submit,
-                    struct hk_cmd_pin *pins)
+                    struct hk_cmd_pin *pins, size_t cap)
 {
    size_t count = 0;
 
@@ -574,18 +581,18 @@ hk_cmd_collect_pins(const struct vk_queue_submit *submit,
       /* uploader.streams uses main.bos; uploader.vdm owns the leases below. */
       for (unsigned l = 0; l < ARRAY_SIZE(lists); ++l) {
          list_for_each_entry(struct hk_cmd_bo, bo, lists[l], link)
-            hk_cmd_add_pin(pins, &count, HK_PIN_BO, bo);
+            hk_cmd_add_pin(pins, &count, cap, HK_PIN_BO, bo);
       }
 
       list_for_each_entry(struct hk_vdm_allocation, span,
                           &cmd->vdm_allocations, link)
-         hk_cmd_add_pin(pins, &count, HK_PIN_SPAN, span);
+         hk_cmd_add_pin(pins, &count, cap, HK_PIN_SPAN, span);
 
       if (cmd->ioto.span)
-         hk_cmd_add_pin(pins, &count, HK_PIN_SPAN, cmd->ioto.span);
+         hk_cmd_add_pin(pins, &count, cap, HK_PIN_SPAN, cmd->ioto.span);
 
       util_dynarray_foreach(&cmd->large_bos, struct agx_bo *, bo)
-         hk_cmd_add_pin(pins, &count, HK_PIN_LARGE, *bo);
+         hk_cmd_add_pin(pins, &count, cap, HK_PIN_LARGE, *bo);
    }
 
    return count;
@@ -622,8 +629,8 @@ hk_cmd_pin_backing(struct hk_cmd_pin pin)
 }
 
 static void
-hk_cmd_pending_release(struct hk_device *dev, struct hk_cmd_pending *p,
-                       bool teardown)
+hk_cmd_pending_release_pins(struct hk_device *dev, struct hk_cmd_pending *p,
+                            bool teardown)
 {
    for (unsigned i = 0; i < p->count; ++i) {
       struct hk_cmd_pin pin = p->pins[i];
@@ -652,7 +659,56 @@ hk_cmd_pending_release(struct hk_device *dev, struct hk_cmd_pending *p,
    for (unsigned i = 0; i < p->chunks; ++i)
       drmSyncobjDestroy(dev->dev.fd, p->signals[i]);
 
-   vk_free(&dev->vk.alloc, p->signals);
+   if (p->signals && p->signals != &p->inline_signal)
+      vk_free(&dev->vk.alloc, p->signals);
+   p->signals = NULL;
+   p->unknown = NULL;
+   p->succeeded = NULL;
+   p->inline_signal = 0;
+   p->inline_unknown = 0;
+   p->inline_succeeded = false;
+   p->chunks = 0;
+   p->attempted = 0;
+   p->point = 0;
+   p->count = 0;
+}
+
+static void
+hk_cmd_pending_recycle_pool(struct hk_device *dev, struct list_head *nodes)
+{
+   struct list_head overflow;
+   list_inithead(&overflow);
+
+   simple_mtx_lock(&dev->cmd_pending_lock);
+   list_for_each_entry_safe(struct hk_cmd_pending, p, nodes, link) {
+      list_del(&p->link);
+      if (dev->cmd_pending_pool_count < HK_CMD_PENDING_POOL) {
+         list_addtail(&p->link, &dev->cmd_pending_pool);
+         dev->cmd_pending_pool_count++;
+      } else {
+         list_addtail(&p->link, &overflow);
+      }
+   }
+   simple_mtx_unlock(&dev->cmd_pending_lock);
+
+   list_for_each_entry_safe(struct hk_cmd_pending, p, &overflow, link) {
+      list_del(&p->link);
+      vk_free(&dev->vk.alloc, p);
+   }
+}
+
+static void
+hk_cmd_pending_release(struct hk_device *dev, struct hk_cmd_pending *p,
+                       bool teardown)
+{
+   hk_cmd_pending_release_pins(dev, p, teardown);
+   if (!teardown && p->pooled) {
+      struct list_head one;
+      list_inithead(&one);
+      list_addtail(&p->link, &one);
+      hk_cmd_pending_recycle_pool(dev, &one);
+      return;
+   }
    vk_free(&dev->vk.alloc, p);
 }
 
@@ -794,8 +850,9 @@ hk_cmd_pending_reap(struct hk_device *dev)
    if (!dev->cmd_pending_ready)
       return;
 
-   struct list_head ready;
+   struct list_head ready, recycled;
    list_inithead(&ready);
+   list_inithead(&recycled);
 
    simple_mtx_lock(&dev->cmd_pending_lock);
    list_for_each_entry_safe(struct hk_queue, queue, &dev->cmd_pending_queues,
@@ -806,8 +863,14 @@ hk_cmd_pending_reap(struct hk_device *dev)
    /* Releasing a span takes vdm.lock; never do it under the pending lock. */
    list_for_each_entry_safe(struct hk_cmd_pending, p, &ready, link) {
       list_del(&p->link);
-      hk_cmd_pending_release(dev, p, false);
+      hk_cmd_pending_release_pins(dev, p, false);
+      if (p->pooled)
+         list_addtail(&p->link, &recycled);
+      else
+         vk_free(&dev->vk.alloc, p);
    }
+   if (!list_is_empty(&recycled))
+      hk_cmd_pending_recycle_pool(dev, &recycled);
 }
 
 VkResult
@@ -816,35 +879,112 @@ hk_cmd_pending_begin(struct hk_device *dev,
                      struct agx_bo *extra_bo, struct hk_cmd_pending **out)
 {
    *out = NULL;
-   hk_cmd_pending_reap(dev);
 
-   size_t count = hk_cmd_collect_pins(submit, NULL) + (extra_bo != NULL);
-   if (count > UINT32_MAX ||
+   const size_t extra_count = (extra_bo != NULL);
+   struct hk_cmd_pin stack_pins[HK_CMD_PENDING_INLINE_PINS];
+   const size_t cmd_pin_count =
+      hk_cmd_collect_pins(submit, stack_pins, ARRAY_SIZE(stack_pins));
+   const size_t count = cmd_pin_count + extra_count;
+   if (count < cmd_pin_count || count > UINT32_MAX ||
        count > (SIZE_MAX - sizeof(struct hk_cmd_pending)) /
                   sizeof(struct hk_cmd_pin))
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-   struct hk_cmd_pending *p =
-      vk_zalloc(&dev->vk.alloc, sizeof(*p) + count * sizeof(p->pins[0]), 8,
-                VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
-   if (!p)
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   const bool use_pool = count <= HK_CMD_PENDING_INLINE_PINS;
+   struct list_head ready, recycled;
+   list_inithead(&ready);
+   list_inithead(&recycled);
 
-   /* The polling scratch and success flags share the handle allocation. */
-   p->signals = vk_zalloc(&dev->vk.alloc,
-                          (size_t)chunks * (2 * sizeof(uint32_t) + sizeof(bool)),
-                          8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
-   if (!p->signals) {
-      vk_free(&dev->vk.alloc, p);
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
-   }
-   p->unknown = p->signals + chunks;
-   p->succeeded = (bool *)(p->unknown + chunks);
+   struct hk_cmd_pending *p = NULL;
+   uint32_t popped_signals[4];
+   unsigned popped = 0;
+   const unsigned pop_limit = MIN2(chunks, (unsigned)ARRAY_SIZE(popped_signals));
 
+   /* Reap retired submissions, recycle their syncobjs, and claim a pooled
+    * record + syncobj handles in a single lock acquisition. */
    simple_mtx_lock(&dev->cmd_pending_lock);
-   while (p->chunks < chunks && dev->cmd_syncobj_count)
-      p->signals[p->chunks++] = dev->cmd_syncobjs[--dev->cmd_syncobj_count];
+   if (dev->cmd_pending_ready) {
+      list_for_each_entry_safe(struct hk_queue, queue, &dev->cmd_pending_queues,
+                               cmd_link)
+         hk_cmd_pending_reap_queue(dev, queue, &ready);
+   }
+   while (popped < pop_limit && dev->cmd_syncobj_count)
+      popped_signals[popped++] = dev->cmd_syncobjs[--dev->cmd_syncobj_count];
+   if (use_pool && !list_is_empty(&dev->cmd_pending_pool)) {
+      p = list_first_entry(&dev->cmd_pending_pool, struct hk_cmd_pending, link);
+      list_del(&p->link);
+      dev->cmd_pending_pool_count--;
+   }
    simple_mtx_unlock(&dev->cmd_pending_lock);
+
+   /* Release pins outside cmd_pending_lock (releasing a span takes vdm.lock).
+    * Reuse a freshly reaped pooled record directly for this submission when
+    * available, avoiding both allocation and a second lock acquisition. */
+   list_for_each_entry_safe(struct hk_cmd_pending, r, &ready, link) {
+      list_del(&r->link);
+      hk_cmd_pending_release_pins(dev, r, false);
+      if (use_pool && !p && r->pooled)
+         p = r;
+      else if (r->pooled)
+         list_addtail(&r->link, &recycled);
+      else
+         vk_free(&dev->vk.alloc, r);
+   }
+   if (!list_is_empty(&recycled))
+      hk_cmd_pending_recycle_pool(dev, &recycled);
+
+   if (!p) {
+      const size_t alloc_pins = use_pool ? HK_CMD_PENDING_INLINE_PINS : count;
+      p = vk_zalloc(&dev->vk.alloc,
+                    sizeof(*p) + alloc_pins * sizeof(p->pins[0]), 8,
+                    VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+      if (!p) {
+         simple_mtx_lock(&dev->cmd_pending_lock);
+         while (popped && dev->cmd_syncobj_count < HK_CMD_SYNCOBJ_POOL)
+            dev->cmd_syncobjs[dev->cmd_syncobj_count++] = popped_signals[--popped];
+         simple_mtx_unlock(&dev->cmd_pending_lock);
+         while (popped)
+            drmSyncobjDestroy(dev->dev.fd, popped_signals[--popped]);
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
+      }
+      p->pooled = use_pool;
+   }
+
+   /* Single-chunk submissions use inline storage; multi-chunk submissions
+    * share one heap allocation for handles, polling scratch, and flags. */
+   if (chunks <= 1) {
+      p->inline_signal = 0;
+      p->inline_unknown = 0;
+      p->inline_succeeded = false;
+      p->signals = &p->inline_signal;
+      p->unknown = &p->inline_unknown;
+      p->succeeded = &p->inline_succeeded;
+   } else {
+      p->signals = vk_zalloc(&dev->vk.alloc,
+                             (size_t)chunks * (2 * sizeof(uint32_t) + sizeof(bool)),
+                             8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+      if (!p->signals) {
+         simple_mtx_lock(&dev->cmd_pending_lock);
+         while (popped && dev->cmd_syncobj_count < HK_CMD_SYNCOBJ_POOL)
+            dev->cmd_syncobjs[dev->cmd_syncobj_count++] = popped_signals[--popped];
+         simple_mtx_unlock(&dev->cmd_pending_lock);
+         while (popped)
+            drmSyncobjDestroy(dev->dev.fd, popped_signals[--popped]);
+         hk_cmd_pending_release(dev, p, false);
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
+      }
+      p->unknown = p->signals + chunks;
+      p->succeeded = (bool *)(p->unknown + chunks);
+   }
+
+   for (unsigned i = 0; i < popped; ++i)
+      p->signals[p->chunks++] = popped_signals[i];
+   if (p->chunks < chunks && chunks > pop_limit) {
+      simple_mtx_lock(&dev->cmd_pending_lock);
+      while (p->chunks < chunks && dev->cmd_syncobj_count)
+         p->signals[p->chunks++] = dev->cmd_syncobjs[--dev->cmd_syncobj_count];
+      simple_mtx_unlock(&dev->cmd_pending_lock);
+   }
 
    for (; p->chunks < chunks; ++p->chunks) {
       if (drmSyncobjCreate(dev->dev.fd, 0, &p->signals[p->chunks])) {
@@ -856,9 +996,16 @@ hk_cmd_pending_begin(struct hk_device *dev,
       }
    }
 
-   size_t used = hk_cmd_collect_pins(submit, p->pins);
+   size_t used;
+   if (cmd_pin_count <= ARRAY_SIZE(stack_pins)) {
+      if (cmd_pin_count)
+         memcpy(p->pins, stack_pins, cmd_pin_count * sizeof(p->pins[0]));
+      used = cmd_pin_count;
+   } else {
+      used = hk_cmd_collect_pins(submit, p->pins, cmd_pin_count);
+   }
    if (extra_bo)
-      hk_cmd_add_pin(p->pins, &used, HK_PIN_LARGE, extra_bo);
+      hk_cmd_add_pin(p->pins, &used, count, HK_PIN_LARGE, extra_bo);
    assert(used == count);
    p->count = used;
    for (unsigned i = 0; i < p->count; ++i)
@@ -948,6 +1095,13 @@ hk_cmd_pending_finish(struct hk_device *dev)
       list_del(&p->link);
       hk_cmd_pending_release(dev, p, true);
    }
+
+   list_for_each_entry_safe(struct hk_cmd_pending, p,
+                            &dev->cmd_pending_pool, link) {
+      list_del(&p->link);
+      vk_free(&dev->vk.alloc, p);
+   }
+   dev->cmd_pending_pool_count = 0;
 
    for (unsigned i = 0; i < dev->cmd_syncobj_count; ++i)
       drmSyncobjDestroy(dev->dev.fd, dev->cmd_syncobjs[i]);

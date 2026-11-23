@@ -40,6 +40,8 @@ struct vk_pipeline_cache;
 
 #define HK_SHADER_BINARY_CACHE_MAX 16
 #define HK_CMD_SYNCOBJ_POOL 64
+#define HK_CMD_PENDING_POOL 32
+#define HK_CMD_PENDING_INLINE_PINS 16
 
 typedef void (*hk_internal_builder_t)(struct nir_builder *b, const void *key);
 
@@ -362,6 +364,9 @@ struct hk_device {
    /* Completion syncobjs of retired submissions, for reuse. */
    uint32_t cmd_syncobjs[HK_CMD_SYNCOBJ_POOL];
    unsigned cmd_syncobj_count;
+   /* Recycled small hk_cmd_pending records (hk_cmd_pending::link). */
+   struct list_head cmd_pending_pool;
+   unsigned cmd_pending_pool_count;
 
    /* In-flight kernel host writes to bound timestamp buffers (timestamp
     * queries and stamped occlusion availability slots), used to emit
