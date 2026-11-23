@@ -1970,12 +1970,19 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
          uint64_t command_prior[HK_SYNC_NUM_SQ] = {
             cs->sync.prior[HK_SYNC_VDM], cs->sync.prior[HK_SYNC_CDM],
          };
+         uint64_t ta_command_prior[HK_SYNC_NUM_SQ] = {
+            cs->sync.prior_ta[HK_SYNC_VDM], cs->sync.prior_ta[HK_SYNC_CDM],
+         };
          if (sib_rewrite) {
             for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
                command_prior[sq] = hk_sibling_prior(
                   command_prior[sq], prior_base[sq], kq_base[sq], &sib_earlier);
+               ta_command_prior[sq] = hk_sibling_prior(
+                  ta_command_prior[sq], prior_base[sq], kq_base[sq],
+                  &sib_earlier);
                /* A zero barrier names this kernel queue's earlier ioctls. */
-               if (cs->sync.barrier[sq] == 0)
+               if (cs->sync.barrier[sq] == 0 ||
+                   (cs->sync.ta_split && cs->sync.barrier_ta[sq] == 0))
                   sib_earlier = true;
             }
          }
@@ -2161,25 +2168,25 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
             if (stage_prefixes)
                cmd.legacy.flags |= DRM_ASAHI_RENDER_STAGE_PREFIXES;
 
-            /* G17P: a render whose vertex half depends on less compute work
-             * than its fragment half (image-only producers ordered by image
-             * barriers, fragment-only destinations) goes as a staged render:
-             * the kernel orders its tiling kick after the narrower prefixes
-             * alone, so its vertex work overlaps compute work that only its
-             * fragment half waits for. Every other render keeps the forms
-             * below, which the kernel can publish directly. */
+            /* Native AGX3 / M5: a render whose vertex half depends on less
+             * compute work than its fragment half (image-only producers ordered
+             * by image barriers, fragment-only destinations) goes as a staged
+             * render: the kernel orders its tiling kick after the narrower
+             * prefixes alone, so its vertex work overlaps compute work that
+             * only its fragment half waits for. Every other render keeps the
+             * forms below, which the kernel can publish directly. */
             const bool g17p_staged =
-               dev->dev.chip == AGX_CHIP_G17P && !queue->sync.serialize &&
-               queue->sync.exact_prior &&
+               !stage_prefixes && agx_chip_native_or_m5(dev->dev.chip) &&
+               !queue->sync.serialize && queue->sync.exact_prior &&
                (dev->dev.params.features &
                 DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES_V2) &&
                cs->sync.ta_split &&
                (cs->sync.barrier_ta[HK_SYNC_CDM] !=
                    cs->sync.barrier[HK_SYNC_CDM] ||
-                cs->sync.prior_ta[HK_SYNC_CDM] != cs->sync.prior[HK_SYNC_CDM]);
+                ta_command_prior[HK_SYNC_CDM] != command_prior[HK_SYNC_CDM]);
             if (g17p_staged) {
                cmd.legacy.flags |= DRM_ASAHI_RENDER_STAGE_PREFIXES;
-               perf_debug_dev(&dev->dev, "G17P staged render");
+               perf_debug_dev(&dev->dev, "AGX3 staged render");
             }
 
             /* The render's vertex half depends on no earlier render while its
@@ -2212,13 +2219,14 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
                          cs->sync.prior[HK_SYNC_VDM] == 0))
                cmd.legacy.flags |= DRM_ASAHI_RENDER_FRAGMENT_BARRIERS;
 
-            /* G17P: a vertex half that still names earlier renders can use
-             * the fragment-only barriers too when the order of tiling kicks
-             * already covers what it names. A staged render takes neither
+            /* Native AGX3 / M5: a vertex half that still names earlier renders
+             * can use the fragment-only barriers too when the order of tiling
+             * kicks already covers what it names. A staged render takes neither
              * the flag nor part in ta_cover: its tiling waits only for its
              * narrower tiling prefix. */
-            if (dev->dev.chip == AGX_CHIP_G17P && !g17p_staged &&
-                !queue->sync.serialize && queue->sync.exact_prior &&
+            if (agx_chip_native_or_m5(dev->dev.chip) && !stage_prefixes &&
+                !g17p_staged && !queue->sync.serialize &&
+                queue->sync.exact_prior &&
                 (dev->dev.params.features &
                  DRM_ASAHI_FEATURE_FRAGMENT_BARRIERS)) {
                const uint64_t base = prior_base[HK_SYNC_VDM];
@@ -2242,14 +2250,14 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
             STATIC_ASSERT(sizeof(struct drm_asahi_cmd_render_with_stage_prior) ==
                           sizeof(struct drm_asahi_cmd_render_with_prior) + 16);
             const bool stage_cdm =
-               !stage_prefixes &&
+               !stage_prefixes && !g17p_staged &&
                agx_chip_g17_m5(dev->dev.chip) && queue->sync.exact_prior &&
                (dev->dev.params.features &
                 DRM_ASAHI_FEATURE_COMPUTE_STAGE_BARRIERS) &&
                cs->sync.ta_split &&
                (cs->sync.barrier_ta[HK_SYNC_CDM] !=
                    cs->sync.barrier[HK_SYNC_CDM] ||
-                cs->sync.prior_ta[HK_SYNC_CDM] != cs->sync.prior[HK_SYNC_CDM]);
+                ta_command_prior[HK_SYNC_CDM] != command_prior[HK_SYNC_CDM]);
             if (stage_cdm)
                cmd.legacy.flags |= DRM_ASAHI_RENDER_COMPUTE_STAGE_BARRIERS;
             if (unlikely(anatomy))
@@ -2269,12 +2277,14 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
                   .render = {.legacy = cmd},
                   .stage_prefixes = {
                      .ta_cdm_barrier = cs->sync.barrier_ta[HK_SYNC_CDM],
-                     .ta_prior_cdm = cs->sync.prior_ta[HK_SYNC_CDM],
+                     .ta_prior_cdm = ta_command_prior[HK_SYNC_CDM],
                      .ta_vdm_barrier = cs->sync.barrier_ta[HK_SYNC_VDM],
-                     .ta_prior_vdm = cs->sync.prior_ta[HK_SYNC_VDM],
+                     .ta_prior_vdm = ta_command_prior[HK_SYNC_VDM],
                   },
                };
-               hk_gen1_render_ray_query_stages(dev, cs, staged.render.ray_query);
+               if (!agx_chip_g17_m5(dev->dev.chip))
+                  hk_gen1_render_ray_query_stages(dev, cs,
+                                                  staged.render.ray_query);
                header.size = sizeof(staged);
                util_dynarray_append(&payload, header);
                util_dynarray_append_array(&payload, uint8_t, &staged, header.size);
@@ -2289,9 +2299,9 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
                const struct drm_asahi_cmd_render_with_stage_prefixes staged = {
                   .legacy = cmd,
                   .ta_cdm_barrier = cs->sync.barrier_ta[HK_SYNC_CDM],
-                  .ta_prior_cdm = cs->sync.prior_ta[HK_SYNC_CDM],
+                  .ta_prior_cdm = ta_command_prior[HK_SYNC_CDM],
                   .ta_vdm_barrier = cs->sync.barrier_ta[HK_SYNC_VDM],
-                  .ta_prior_vdm = cs->sync.prior_ta[HK_SYNC_VDM],
+                  .ta_prior_vdm = ta_command_prior[HK_SYNC_VDM],
                };
                header.size = sizeof(staged);
                util_dynarray_append(&payload, header);
@@ -2301,7 +2311,7 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
                const struct drm_asahi_cmd_render_with_stage_prior staged = {
                   .legacy = cmd,
                   .ta_cdm_barrier = cs->sync.barrier_ta[HK_SYNC_CDM],
-                  .ta_prior_cdm = cs->sync.prior_ta[HK_SYNC_CDM],
+                  .ta_prior_cdm = ta_command_prior[HK_SYNC_CDM],
                };
                header.size = sizeof(staged);
                util_dynarray_append(&payload, header);
