@@ -192,15 +192,12 @@ hk_resolve_oq_forward(struct hk_cmd_buffer *cmd)
       hk_dispatch_imm_writes(cmd, movable);
 }
 
-/* Whether the stores of the deferred stream post can join into, a later
- * movable stream: post carries nothing else, into waits on a render at or
- * after the one post waits on (renders complete in order, as
- * hk_resolve_oq_forward() also relies on), and nothing else in the command
- * buffer waits on post, so dropping it moves its stores later without moving
- * them past a consumer. Unlike in hk_stamp_oq_available(), compute waiting on
- * the render does not prevent this: into is that compute, and it is the one
- * command left for these stores. Stamping the render instead would make into
- * wait for the host-side retirement of the render. */
+/* Check whether deferred stream `post` can merge its stores into a later
+ * movable stream `into`: `post` has no other work or consumers, and `into`
+ * already waits on a render at or after `post`'s render (renders complete in
+ * order). Stamping `post`'s render instead would force `into` to wait on
+ * host-side render retirement.
+ */
 static bool
 hk_oq_joins(struct hk_cmd_buffer *cmd, struct hk_cs *post, struct hk_cs *into)
 {
@@ -229,14 +226,10 @@ hk_oq_joins(struct hk_cmd_buffer *cmd, struct hk_cs *post, struct hk_cs *into)
    return true;
 }
 
-/* From the end of the command buffer. A later stream whose render carries its
- * stores is dropped before earlier streams are judged, so it no longer counts
- * as compute waiting on the render subqueue, and an earlier render can carry
- * its own stores too. A stream that stays (kept, or movable) still counts.
- * Once a movable stream remains, every earlier stream that can join it does
- * (hk_oq_joins()), whether or not its own render could have carried the
- * stores: the movable stream is emitted anyway and waits on all of those
- * renders, so one compute command serves the whole command buffer. */
+/* Walk from the end of the command buffer so dropping a later stream's compute
+ * removes its render wait before earlier streams are evaluated. Once a movable
+ * stream remains, merge all eligible earlier streams into it via hk_oq_joins().
+ */
 static void
 hk_resolve_oq_reverse(struct hk_cmd_buffer *cmd)
 {
@@ -282,19 +275,21 @@ hk_resolve_oq_reverse(struct hk_cmd_buffer *cmd)
 bool
 hk_oq_render_stamps_supported(enum agx_chip chip)
 {
-   /* G17P and M5 (G17G/G17S) both run the shared G17 kernel runtime: a render
-    * completes only once its completion stamps cover it, after the
-    * end-of-render maintenance, and the host then writes its four stage
-    * timestamps into the requested slots before signalling the fence
-    * (g17/queue/render/retirement.rs, g17/completion.rs). */
+   /* Admitted: G17P and M5 (G17G/G17S), whose shared G17 kernel runtime writes
+    * three of the four stage timestamp slots (all except firmware-written
+    * fragment-end; see hk_query_oq.h) after end-of-render maintenance before
+    * signalling the render fence. Closed: G15 and earlier (firmware writes
+    * stage stamps before occlusion counts land) and G16/G17A/G18G.
+    */
    return agx_chip_g17p_or_m5(chip);
 }
 
 void
 hk_resolve_deferred_oq_available(struct hk_cmd_buffer *cmd)
 {
-   /* The reverse order is qualified on G17P; the other native AGX3 chips keep
-    * recording order until it is measured there. */
+   /* Admitted: G17P (reverse order); closed: other native AGX3 chips
+    * (unmeasured, keep forward recording order).
+    */
    if (hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G17P)
       hk_resolve_oq_reverse(cmd);
    else
