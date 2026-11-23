@@ -556,23 +556,35 @@ static inline bool
 hk_m5_msaa_color_compression_eligible(enum agx_chip chip, unsigned plane,
                                      const VkImageCreateInfo *info)
 {
+   const VkImageCreateFlags allowed_flags =
+      VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
    const VkImageUsageFlags allowed_usage =
       VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+      VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT |
+      VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
 
    if (chip != AGX_CHIP_G17S || plane != 0 || !info)
       return false;
 
    for (const void *next = info->pNext; next;) {
       VkStructureType type;
+      const void *following;
       memcpy(&type, next, sizeof(type));
-      if (type != VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO)
+      memcpy(&following, (const char *)next + offsetof(VkBaseInStructure, pNext),
+             sizeof(following));
+      if (type == VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO) {
+         VkExternalMemoryImageCreateInfo external;
+         memcpy(&external, next, sizeof(external));
+         if (external.handleTypes)
+            return false;
+      } else if (type != VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO) {
          return false;
-      memcpy(&next, (const char *)next + offsetof(VkBaseInStructure, pNext),
-             sizeof(next));
+      }
+      next = following;
    }
 
-   return !(info->flags & ~VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) &&
+   return !(info->flags & ~allowed_flags) &&
           info->imageType == VK_IMAGE_TYPE_2D &&
           info->extent.depth == 1 && info->extent.width >= 16 &&
           info->extent.height >= 16 && info->arrayLayers == 1 &&

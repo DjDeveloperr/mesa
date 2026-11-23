@@ -551,11 +551,19 @@ hk_m5_storage_compression_eligible(const struct agx_device *dev, unsigned plane,
     * image's channel layout in the list. */
    const VkImageCreateFlags allowed_flags =
       VK_IMAGE_CREATE_EXTENDED_USAGE_BIT | VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
-   const VkBaseInStructure *ext = info->pNext;
-   const bool format_list_only =
-      (info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) && ext &&
-      ext->sType == VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO &&
-      !ext->pNext;
+   bool has_format_list = false;
+   for (const VkBaseInStructure *ext = info->pNext; ext; ext = ext->pNext) {
+      if (ext->sType == VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO) {
+         const VkExternalMemoryImageCreateInfo *external =
+            (const VkExternalMemoryImageCreateInfo *)ext;
+         if (external->handleTypes)
+            return false;
+      } else if (ext->sType == VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO) {
+         has_format_list = true;
+      } else {
+         return false;
+      }
+   }
 
    /* G17P storage images stay uncompressed: a shader image store through
     * the G17P PBE does not merge into a compressed block or update its
@@ -578,7 +586,6 @@ hk_m5_storage_compression_eligible(const struct agx_device *dev, unsigned plane,
       return false;
 
    if (dev->chip != AGX_CHIP_G17S || plane ||
-       (info->pNext && !format_list_only) ||
        (info->flags & ~allowed_flags) ||
        info->imageType != VK_IMAGE_TYPE_2D || info->extent.depth != 1 ||
        info->extent.width < 16 || info->extent.height < 16 ||
@@ -632,7 +639,7 @@ hk_m5_storage_compression_eligible(const struct agx_device *dev, unsigned plane,
    }
    /* A mutable image's views may be FLOAT when the image is not: the list
     * check in hk_can_compress() keeps them to the image's channel layout. */
-   if ((info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) && !format_list_only)
+   if ((info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) && !has_format_list)
       return false;
    return debug_get_option_m5_storage_compression() & bit;
 }

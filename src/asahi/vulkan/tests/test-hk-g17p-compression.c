@@ -775,6 +775,28 @@ check_m5_msaa_color(void)
     * format list of compatible views. Aliasing is not. */
    c = i; c.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
    CHECK(hk_m5_msaa_color_compression_eligible(AGX_CHIP_G17S, 0, &c));
+   c = i; c.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT |
+                    VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+   CHECK(hk_m5_msaa_color_compression_eligible(AGX_CHIP_G17S, 0, &c));
+   c = i; c.usage |= VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT |
+                     VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
+   CHECK(hk_m5_msaa_color_compression_eligible(AGX_CHIP_G17S, 0, &c));
+   /* Host-image-copy queries chain a zero-handleTypes external memory struct. */
+   VkImageFormatListCreateInfo list = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
+   };
+   VkExternalMemoryImageCreateInfo external = {
+      .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+      .pNext = &list,
+      .handleTypes = 0,
+   };
+   c = i; c.pNext = &external;
+   CHECK(hk_m5_msaa_color_compression_eligible(AGX_CHIP_G17S, 0, &c));
+   external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+   CHECK(!hk_m5_msaa_color_compression_eligible(AGX_CHIP_G17S, 0, &c));
+   VkBaseInStructure wsi = {.sType = HK_G17P_WSI_IMAGE_CREATE_INFO_MESA};
+   c = i; c.pNext = &wsi;
+   CHECK(!hk_m5_msaa_color_compression_eligible(AGX_CHIP_G17S, 0, &c));
    c = i; c.flags = VK_IMAGE_CREATE_ALIAS_BIT;
    CHECK(!hk_m5_msaa_color_compression_eligible(AGX_CHIP_G17S, 0, &c));
    c = i; c.arrayLayers = 2;

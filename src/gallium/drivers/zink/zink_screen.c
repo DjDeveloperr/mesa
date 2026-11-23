@@ -3307,11 +3307,13 @@ init_driver_workarounds(struct zink_screen *screen)
     * it and recreate an image with it before a draw or copy first reads the
     * image while writing it (zink_update_lazy_feedback_loops()).
     *
-    * Only G17P compresses on this rule; other Borealis parts keep the
-    * usage on every render target.
+    * Borealis disables lossless colour compression whenever
+    * ATTACHMENT_FEEDBACK_LOOP usage is requested on any generation, so defer
+    * the usage across the driver whenever general_layout and the feedback-loop
+    * layout extension are active.
     */
    screen->driver_workarounds.lazy_feedback_loop_usage =
-      zink_borealis_g17p(screen) &&
+      zink_driverid(screen) == VK_DRIVER_ID_AURORA_BOREALIS &&
       screen->driver_workarounds.general_layout &&
       screen->info.have_EXT_attachment_feedback_loop_layout;
 
