@@ -2744,6 +2744,44 @@ compute_pair_copy4_match(const struct hk_compute_pair_dispatch *producer,
        copy4->info.role != HK_COMPUTE_PAIR_COPY4)
       return false;
 
+   const struct hk_compute_pair_copy4 *cp = &copy4->extra.copy4;
+   if (!copy4->bindings[1].address ||
+       copy4->bindings[1].address > UINT64_MAX - cp->dst_start ||
+       cp->src_start > UINT64_MAX - cp->bytes ||
+       cp->dst_start > UINT64_MAX - cp->bytes)
+      return false;
+
+   if (producer->info.role == HK_COMPUTE_PAIR_FADD) {
+      const struct hk_compute_pair_copy4 *fp = &producer->extra.copy4;
+      if (producer->alt_kind != HK_COMPUTE_PAIR_ALT_LINEAR_FADD ||
+          hk_dual_write_push_offset(producer->info.fadd_push_bytes) +
+             sizeof(struct hk_dual_copy_push) > HK_MAX_PUSH_SIZE ||
+          ((copy4->bindings[1].address + cp->dst_start) % 16) != 0 ||
+          fp->src_start > UINT64_MAX - fp->bytes ||
+          fp->dst_start > UINT64_MAX - fp->bytes)
+         return false;
+
+      struct hk_compute_pair_interval output, src, dst;
+      if (!compute_pair_interval(&producer->bindings[2], fp->dst_start,
+                                 fp->dst_start + fp->bytes, &output) ||
+          !compute_pair_interval(&copy4->bindings[0], cp->src_start,
+                                 cp->src_start + cp->bytes, &src) ||
+          !compute_pair_interval(&copy4->bindings[1], cp->dst_start,
+                                 cp->dst_start + cp->bytes, &dst) ||
+          !compute_pair_same_interval(&output, &src) ||
+          !compute_pair_intervals_disjoint(&output, &dst))
+         return false;
+
+      for (unsigned i = 0; i < 2; ++i) {
+         struct hk_compute_pair_interval read;
+         if (!compute_pair_interval(&producer->bindings[i], fp->src_start,
+                                    fp->src_start + fp->bytes, &read) ||
+             !compute_pair_intervals_disjoint(&read, &dst))
+            return false;
+      }
+      return true;
+   }
+
    struct hk_nir_direct_shape ps = {producer->push, sizeof(producer->push)};
    memcpy(ps.groups, producer->groups, sizeof(ps.groups));
 
@@ -2776,15 +2814,8 @@ compute_pair_copy4_match(const struct hk_compute_pair_dispatch *producer,
    }
 
    if (hk_dual_write_push_offset(push_bytes) + sizeof(struct hk_dual_copy_push) >
-       HK_MAX_PUSH_SIZE)
-      return false;
-
-   const struct hk_compute_pair_copy4 *cp = &copy4->extra.copy4;
-   if (!copy4->bindings[1].address ||
-       copy4->bindings[1].address > UINT64_MAX - cp->dst_start ||
-       ((copy4->bindings[1].address + cp->dst_start) % dst_align) != 0 ||
-       cp->src_start > UINT64_MAX - cp->bytes ||
-       cp->dst_start > UINT64_MAX - cp->bytes)
+       HK_MAX_PUSH_SIZE ||
+       ((copy4->bindings[1].address + cp->dst_start) % dst_align) != 0)
       return false;
 
    struct hk_compute_pair_interval output, src, dst;
@@ -2932,7 +2963,8 @@ hk_pack_runs(struct hk_device *dev, const struct hk_queue *queue,
          if (members[i].cs && hk_compute_pair_stream_eligible(members[i].cs)) {
             const struct hk_compute_pair_dispatch *p = members[i].cs->compute_pair;
             if ((p->info.role == HK_COMPUTE_PAIR_DEPTHWISE ||
-                 p->info.role == HK_COMPUTE_PAIR_GEMM) &&
+                 p->info.role == HK_COMPUTE_PAIR_GEMM ||
+                 p->info.role == HK_COMPUTE_PAIR_FADD) &&
                 AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE > members[i].bytes) {
                members[i].bytes = AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE;
             }
@@ -2972,7 +3004,8 @@ hk_pack_runs(struct hk_device *dev, const struct hk_queue *queue,
                continue;
             }
             if ((p->info.role != HK_COMPUTE_PAIR_DEPTHWISE &&
-                 p->info.role != HK_COMPUTE_PAIR_GEMM) ||
+                 p->info.role != HK_COMPUTE_PAIR_GEMM &&
+                 p->info.role != HK_COMPUTE_PAIR_FADD) ||
                 !p->producer || !p->root_va)
                continue;
 
@@ -3198,7 +3231,9 @@ hk_pack_runs(struct hk_device *dev, const struct hk_queue *queue,
                   const uint32_t prod_pb =
                      p_disp->info.role == HK_COMPUTE_PAIR_DEPTHWISE
                         ? p_disp->info.depthwise.push_bytes
-                        : p_disp->info.gemm.push_bytes;
+                        : p_disp->info.role == HK_COMPUTE_PAIR_FADD
+                             ? p_disp->info.fadd_push_bytes
+                             : p_disp->info.gemm.push_bytes;
                   const uint32_t dual_off = hk_dual_write_push_offset(prod_pb);
                   if (pl->dual_write == HK_COMPUTE_PAIR_DUAL_COPY) {
                      const uint64_t dst2_va =
