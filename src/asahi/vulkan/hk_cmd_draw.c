@@ -2569,6 +2569,8 @@ hk_build_m5_bg_eot(struct hk_cmd_buffer *cmd, struct agx_bg_eot_key *key,
    if (multisample)
       key->multisample_store = store && (!final_resolve || store_source);
    key->m5_store_and_resolve = final_resolve && store_source;
+   key->g17p_packed_clear =
+      !store && op == AGX_BG_CLEAR && agx_g17p_packed_clear_ok(&key->tib);
    if (op == AGX_BG_CLEAR)
       key->reserved_preamble = AGX3_G17P_RT0_CLEAR_PUSH_HALFS;
    shader = agx_get_bg_eot_shader(&dev->bg_eot, key);
@@ -2613,10 +2615,19 @@ hk_build_m5_bg_eot(struct hk_cmd_buffer *cmd, struct agx_bg_eot_key *key,
       if (shader->info.push_count != AGX3_G17P_RT0_CLEAR_PUSH_HALFS ||
           shader->info.uses_txf)
          goto unsupported;
-      const VkClearColorValue zero = {0};
-      uint64_t clear = hk_pool_upload(cmd,
-         clear_dont_care ? &zero : &info->pColorAttachments[0].clearValue.color,
-         sizeof(zero), 16);
+      VkClearColorValue clear_value =
+         clear_dont_care ? (VkClearColorValue){0}
+                         : info->pColorAttachments[0].clearValue.color;
+      if (key->g17p_packed_clear && !clear_dont_care) {
+         const float *c = clear_value.float32;
+         const uint32_t packed = hk_g17p_unorm8(c[0]) |
+                                 (hk_g17p_unorm8(c[1]) << 8) |
+                                 (hk_g17p_unorm8(c[2]) << 16) |
+                                 (hk_g17p_unorm8(c[3]) << 24);
+         memset(&clear_value, 0, sizeof(clear_value));
+         clear_value.uint32[0] = packed;
+      }
+      uint64_t clear = hk_pool_upload(cmd, &clear_value, sizeof(clear_value), 16);
       if (!clear)
          return (struct hk_bg_eot){0};
       ranges[0] = (struct agx3_ioto_uniform_range){4, 8, clear};
