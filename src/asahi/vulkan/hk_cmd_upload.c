@@ -54,8 +54,13 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
       desc->dynamic_buffer_end * sizeof(root->dynamic_buffers[0]));
    const size_t tail_B = hk_root_descriptor_offset(set_dynamic_buffer_start);
    /* CPU-decoded descriptor programs use a new root identity to invalidate
-    * their native program caches, even when only set memory changed. */
-   if (agx_chip_native_agx3(dev->dev.chip) && desc->uploaded_root.gpu &&
+    * their native program caches, even when only set memory changed. Chips
+    * with CPU-cached command memory can also compare against the prior
+    * uploaded root without paying uncached read latency. */
+   const bool reuse_root =
+      agx_chip_native_agx3(dev->dev.chip) ||
+      hk_g17p_cached_cmd_memory(&dev->dev);
+   if (reuse_root && desc->uploaded_root.gpu &&
        desc->uploaded_root_size == root_size &&
        desc->generation == desc->uploaded_root_generation &&
        desc->dynamic_buffer_end == desc->uploaded_dynamic_buffer_end) {
@@ -68,8 +73,15 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
              cmd->state.gfx.root &&
              desc->uploaded_root.gpu != cmd->state.gfx.root)
             cmd->state.gfx.g17p_bind_tail.valid = false;
-         if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS)
+         if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
             cmd->state.gfx.root_cpu = desc->uploaded_root.cpu;
+            if (agx_chip_g17_m5(dev->dev.chip) &&
+                cmd->state.gfx.root_fragment_snapshot_cpu !=
+                   desc->uploaded_root.cpu) {
+               hk_root_fragment_snapshot_publish(&cmd->state.gfx,
+                                                 desc->uploaded_root.cpu, root);
+            }
+         }
          hk_upload_stat(cmd, root_reuses, 1);
          return desc->uploaded_root.gpu;
       }
