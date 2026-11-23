@@ -16734,6 +16734,18 @@ agx_compile_shader_nir_internal(nir_shader *nir, struct agx_shader_key *key,
       NIR_PASS(_, nir, nir_opt_dce);
    }
 
+   if ((key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+        key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
+       !key->dev.emit_agx3d && mesa_shader_stage_is_compute(nir->info.stage)) {
+      bool packed_mux = false;
+      NIR_PASS(packed_mux, nir, agx_nir_opt_pack_narrow_mux_tree);
+      if (packed_mux) {
+         NIR_PASS(_, nir, nir_opt_dce);
+         NIR_PASS(_, nir, nir_opt_cse);
+         nir_divergence_analysis(nir);
+      }
+   }
+
    if (key->dev.encoding == AGX_ISA_ENCODING_AGX3C) {
       NIR_PASS(_, nir, agx_nir_opt_canonical_minmax);
       NIR_PASS(_, nir, nir_opt_dce);
