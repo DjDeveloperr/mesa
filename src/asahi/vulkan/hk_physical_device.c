@@ -1101,9 +1101,11 @@ hk_get_device_features(
       }
    }
 
-   /* Compute derivatives are NIR quad-swap lowering plus explicit-gradient
-    * samples, both available on M5; quad control remains restricted to G17P. */
+   /* Compute derivatives use NIR quad-swap lowering plus explicit-gradient
+    * samples, and quad control uses the shared AGX3 quad encodings and HAL300
+    * triangle-merge control on M5. */
    if (agx_chip_g17_m5(dev->chip)) {
+      features->shaderQuadControl = true;
       features->computeDerivativeGroupQuads = true;
       features->computeDerivativeGroupLinear = true;
    }

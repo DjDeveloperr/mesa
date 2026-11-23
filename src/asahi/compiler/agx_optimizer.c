@@ -1735,7 +1735,7 @@ agx_optimizer_ballot(agx_context *ctx, agx_instr **defs, agx_instr *I)
     * for quad any/all and let lower_pseudo ballot its nonzero boolean.
     */
    if (quad && I->dest[0].size == AGX_SIZE_16 && ctx->key &&
-       ctx->key->dev.chip == AGX_CHIP_G17P &&
+       agx_chip_g17p_or_m5(ctx->key->dev.chip) &&
        ctx->key->dev.shader_quad_control &&
        (def->op != AGX_OPCODE_ICMP ||
         def->src[1].type != AGX_INDEX_IMMEDIATE || def->src[1].value != 0 ||
