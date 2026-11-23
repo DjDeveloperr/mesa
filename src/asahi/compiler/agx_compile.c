@@ -16595,17 +16595,20 @@ agx_compile_shader_nir_internal(nir_shader *nir, struct agx_shader_key *key,
       nir->options = &agx3_options;
    }
 
-   /* The AGX3 packer admits SR 34/36 only on AGX3B and in these stages
-    * (agx3_pack_binary.c, GET_SR_COVERAGE); a geometry or tessellation
+   /* The AGX3 packer admits SR 34/36 on AGX3B and non-G18G AGX3C in these
+    * stages (agx3_pack_binary.c, GET_SR_COVERAGE); a geometry or tessellation
     * evaluation shader with a uniform-address atomic would fail to compile.
     */
    const mesa_shader_stage stage = nir->info.stage;
    const bool uniform_atomics =
       !is_agx3 ||
-      (is_g17p && (stage == MESA_SHADER_COMPUTE ||
-                   stage == MESA_SHADER_VERTEX ||
-                   stage == MESA_SHADER_TESS_CTRL ||
-                   stage == MESA_SHADER_FRAGMENT));
+      ((is_g17p ||
+        (key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+         !key->dev.emit_agx3d)) &&
+       (stage == MESA_SHADER_COMPUTE ||
+        stage == MESA_SHADER_VERTEX ||
+        stage == MESA_SHADER_TESS_CTRL ||
+        stage == MESA_SHADER_FRAGMENT));
 
    if (!pre_preamble_optimized) {
       /* Apple's G17P loops are a

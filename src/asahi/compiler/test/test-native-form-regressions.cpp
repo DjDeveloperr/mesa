@@ -7489,3 +7489,34 @@ TEST(NativeForms, M5FenceMemToTexUsesNonRendezvousFences)
    free(part.binary);
    ralloc_free(b.shader);
 }
+
+TEST(NativeForms, AGX3CUniformAddressAtomicPacksWithActiveThreadSRs)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "agx3c uniform atomic");
+   b.shader->info.workgroup_size[0] = 32;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *base = nir_load_preamble(&b, 1, 64, .base = 0);
+   nir_def *prev = nir_global_atomic(&b, 32, base, nir_imm_int(&b, 1),
+                                     .atomic_op = nir_atomic_op_iadd);
+   nir_def *idx = nir_load_local_invocation_index(&b);
+   nir_def *out_addr =
+      nir_iadd(&b, base, nir_u2u64(&b, nir_ishl_imm(&b, nir_iadd_imm(&b, idx, 1), 2)));
+   nir_store_global(&b, prev, out_addr, .align_mul = 4);
+
+   agx_preprocess_nir_m5(b.shader);
+
+   agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+   key.dev.chip = AGX_CHIP_G17S;
+   key.no_preamble = true;
+   key.reserved_preamble = 8;
+   agx_shader_part part = {};
+   ASSERT_TRUE(agx_compile_shader_nir(b.shader, &key, &part));
+   ASSERT_NE(part.binary, nullptr);
+
+   free(part.binary);
+   ralloc_free(b.shader);
+}
