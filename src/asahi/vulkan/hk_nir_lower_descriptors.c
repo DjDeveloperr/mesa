@@ -144,12 +144,22 @@ load_speculatable(nir_builder *b, unsigned num_components, unsigned bit_size,
 }
 
 static nir_def *
-load_root(nir_builder *b, unsigned num_components, unsigned bit_size,
-          nir_def *offset, unsigned align)
+load_root_access(nir_builder *b, unsigned num_components, unsigned bit_size,
+                 nir_def *offset, unsigned align,
+                 enum gl_access_qualifier access)
 {
    nir_def *addr = nir_iadd(b, nir_load_root_agx(b), nir_u2u64(b, offset));
 
-   return load_speculatable(b, num_components, bit_size, addr, align);
+   return nir_load_global_constant(b, num_components, bit_size, addr,
+                                   .align_mul = align, .access = access);
+}
+
+static nir_def *
+load_root(nir_builder *b, unsigned num_components, unsigned bit_size,
+          nir_def *offset, unsigned align)
+{
+   return load_root_access(b, num_components, bit_size, offset, align,
+                           ACCESS_CAN_SPECULATE);
 }
 
 static bool
@@ -233,6 +243,11 @@ load_descriptor(nir_builder *b, unsigned num_components, unsigned bit_size,
         num_components == 5));
    const unsigned load_components = map_address ? 4 : num_components;
 
+   const bool const_index = nir_def_is_const(index);
+   const bool agx3_desc_gen =
+      ctx->descriptor_generation == AGX_DESCRIPTOR_GENERATION_9 ||
+      ctx->descriptor_generation == AGX_DESCRIPTOR_GENERATION_10;
+
    if (ctx->clamp_desc_array_bounds)
       index =
          nir_umin(b, index, nir_imm_int(b, binding_layout->array_size - 1));
@@ -251,8 +266,22 @@ load_descriptor(nir_builder *b, unsigned num_components, unsigned bit_size,
          b, nir_amul_imm(b, index, sizeof(struct hk_buffer_address)),
          hk_root_descriptor_offset(dynamic_buffers));
 
+      /* Unless it may be partly bound, a statically used dynamic buffer
+       * descriptor is valid on every path (with VK_WHOLE_SIZE clamped by
+       * pDynamicOffsets at bind time), so AGX3 can hoist constant reads
+       * through it past the branches that guard them, see
+       * agx_nir_opt_preamble. */
+      const bool always_valid =
+         agx3_desc_gen && const_index &&
+         !(binding_layout->flags &
+           (VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+            VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT));
+
       assert(num_components == (map_address ? 5 : 4) && bit_size == 32);
-      nir_def *desc = load_root(b, 4, 32, root_desc_offset, 16);
+      nir_def *desc = load_root_access(
+         b, 4, 32, root_desc_offset, 16,
+         ACCESS_CAN_SPECULATE |
+            (always_valid ? ACCESS_BUFFER_DESCRIPTOR_AGX : 0));
 
       if (map_address)
          return storage_address(b, desc, ctx);
@@ -292,12 +321,11 @@ load_descriptor(nir_builder *b, unsigned num_components, unsigned bit_size,
       desc_align_offset %= desc_align_mul;
 
       /* Unless it may be partly bound, a statically used descriptor is valid
-       * on every path, so G17P can hoist constant reads through it past the
+       * on every path, so AGX3 can hoist constant reads through it past the
        * branches that guard them, see agx_nir_opt_preamble.
        */
       const bool always_valid =
-         ctx->descriptor_generation == AGX_DESCRIPTOR_GENERATION_9 &&
-         nir_def_is_const(index) &&
+         agx3_desc_gen && const_index &&
          (binding_layout->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
           binding_layout->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) &&
          !(binding_layout->flags &

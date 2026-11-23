@@ -22,7 +22,7 @@ struct speculative_result {
 /* A constant read of a uniform buffer under a non-uniform if. */
 static speculative_result
 run_speculative(gl_access_qualifier desc_access, unsigned index,
-                unsigned used_halves)
+                unsigned used_halves, bool agx3c)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_FRAGMENT, &agx_nir_options, "speculative buffer read");
@@ -47,7 +47,7 @@ run_speculative(gl_access_qualifier desc_access, unsigned index,
    NIR_PASS(_, b.shader, nir_opt_dce);
    nir_validate_shader(b.shader, "before preamble");
    unsigned sizes[] = {used_halves, 0, 0};
-   agx_nir_opt_preamble(b.shader, sizes, true, false, NULL);
+   agx_nir_opt_preamble(b.shader, sizes, true, agx3c, NULL);
    nir_validate_shader(b.shader, "after preamble");
 
    speculative_result r = {};
@@ -88,35 +88,44 @@ run_speculative(gl_access_qualifier desc_access, unsigned index,
 
 TEST(PreambleSpeculativeBuffer, MovesGuardedByTheBoundSize)
 {
-   speculative_result r = run_speculative(VALID_DESCRIPTOR, 3, 4);
-   EXPECT_EQ(r.main_loads, 0u);
-   EXPECT_EQ(r.preamble_loads, 1u);
-   EXPECT_EQ(r.guarded, 1u);
-   /* Four vec4s: the read ends 64 bytes in. */
-   EXPECT_EQ(r.end, 64u);
+   for (bool agx3c : {false, true}) {
+      speculative_result r = run_speculative(VALID_DESCRIPTOR, 3, 4, agx3c);
+      EXPECT_EQ(r.main_loads, 0u) << "agx3c " << agx3c;
+      EXPECT_EQ(r.preamble_loads, 1u) << "agx3c " << agx3c;
+      EXPECT_EQ(r.guarded, 1u) << "agx3c " << agx3c;
+      /* Four vec4s: the read ends 64 bytes in. */
+      EXPECT_EQ(r.end, 64u) << "agx3c " << agx3c;
+   }
 }
 
 TEST(PreambleSpeculativeBuffer, UnknownDescriptorStays)
 {
-   speculative_result r = run_speculative(ACCESS_CAN_SPECULATE, 3, 4);
-   EXPECT_EQ(r.main_loads, 1u);
-   EXPECT_EQ(r.guarded, 0u);
-   EXPECT_FALSE(r.main_speculatable);
+   for (bool agx3c : {false, true}) {
+      speculative_result r =
+         run_speculative(ACCESS_CAN_SPECULATE, 3, 4, agx3c);
+      EXPECT_EQ(r.main_loads, 1u) << "agx3c " << agx3c;
+      EXPECT_EQ(r.guarded, 0u) << "agx3c " << agx3c;
+      EXPECT_FALSE(r.main_speculatable) << "agx3c " << agx3c;
+   }
 }
 
 TEST(PreambleSpeculativeBuffer, StaysWhenStorageIsTaken)
 {
-   speculative_result r = run_speculative(VALID_DESCRIPTOR, 3, 478);
-   EXPECT_EQ(r.main_loads, 1u);
-   EXPECT_EQ(r.guarded, 0u);
-   EXPECT_FALSE(r.main_speculatable);
+   for (bool agx3c : {false, true}) {
+      speculative_result r = run_speculative(VALID_DESCRIPTOR, 3, 478, agx3c);
+      EXPECT_EQ(r.main_loads, 1u) << "agx3c " << agx3c;
+      EXPECT_EQ(r.guarded, 0u) << "agx3c " << agx3c;
+      EXPECT_FALSE(r.main_speculatable) << "agx3c " << agx3c;
+   }
 }
 
 TEST(PreambleSpeculativeBuffer, StaysPastTheZeroPage)
 {
-   speculative_result r =
-      run_speculative(VALID_DESCRIPTOR, AGX_ZERO_PAGE_SIZE / 16, 4);
-   EXPECT_EQ(r.main_loads, 1u);
-   EXPECT_EQ(r.guarded, 0u);
-   EXPECT_FALSE(r.main_speculatable);
+   for (bool agx3c : {false, true}) {
+      speculative_result r =
+         run_speculative(VALID_DESCRIPTOR, AGX_ZERO_PAGE_SIZE / 16, 4, agx3c);
+      EXPECT_EQ(r.main_loads, 1u) << "agx3c " << agx3c;
+      EXPECT_EQ(r.guarded, 0u) << "agx3c " << agx3c;
+      EXPECT_FALSE(r.main_speculatable) << "agx3c " << agx3c;
+   }
 }

@@ -1589,9 +1589,26 @@ hk_bind_descriptor_sets(struct hk_cmd_buffer *cmd,
          if (set != NULL && set_layout->vk.dynamic_descriptor_count > 0) {
             for (uint32_t j = 0; j < set_layout->vk.dynamic_descriptor_count; j++) {
                struct hk_buffer_address addr = set->dynamic_buffers[j];
-               /* A null buffer stays at the zero page (hk_ubo_addr_format). */
-               if (addr.size)
-                  addr.base_addr += info->pDynamicOffsets[next_dyn_offset + j];
+               /* A null buffer stays at the zero page (hk_ubo_addr_format).
+                * A VK_WHOLE_SIZE binding's effective range shrinks by the
+                * dynamic offset so addr.size stays within the mapped buffer
+                * for both explicit bounds checks and speculative preamble
+                * loads. */
+               if (addr.size) {
+                  const uint32_t dyn_offset =
+                     info->pDynamicOffsets[next_dyn_offset + j];
+                  if (BITSET_TEST(set->dynamic_buffer_whole_size, j)) {
+                     if (dyn_offset < addr.size) {
+                        addr.base_addr += dyn_offset;
+                        addr.size -= dyn_offset;
+                     } else {
+                        addr.base_addr = AGX_ZERO_PAGE_ADDRESS;
+                        addr.size = 0;
+                     }
+                  } else {
+                     addr.base_addr += dyn_offset;
+                  }
+               }
                const struct hk_buffer_address *old =
                   &desc->root.dynamic_buffers[dyn_buffer_start + j];
                root_changed |= old->base_addr != addr.base_addr ||

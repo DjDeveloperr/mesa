@@ -550,7 +550,7 @@ rewrite_cost_agx3c(nir_def *def, const void *data)
 {
    if (def->bit_size < 32 && def->num_components > 1)
       return 1e30f;
-   return rewrite_cost_impl(def, true);
+   return rewrite_cost_g17p(def, data);
 }
 
 static bool
@@ -1045,14 +1045,15 @@ agx_nir_opt_preamble(nir_shader *nir, unsigned *sizes, bool g17p,
       options.instr_cost_cb = agx3c ? instr_cost_agx3c : instr_cost_g17p;
       options.rewrite_cost_cb = agx3c ? rewrite_cost_agx3c : rewrite_cost_g17p;
    }
-   /* Every AGX3B chip: the uniform file it fills is the encoding's. */
+   /* Every AGX3 chip (AGX3B and AGX3C): the uniform file it fills is finite
+    * and guarded speculative hoisting uses the shared zero page. */
    struct set *branches = NULL;
-   if (g17p && !agx3c) {
+   if (g17p) {
       branches = surviving_branches(nir, &options, sizes, flatten);
       options.cb_data = branches;
    }
    bool speculative = false;
-   if (g17p && !agx3c && nir->info.stage == MESA_SHADER_FRAGMENT) {
+   if (g17p && nir->info.stage == MESA_SHADER_FRAGMENT) {
       unsigned free_halves = free_preamble_halves(nir, &options, sizes);
       NIR_PASS(speculative, nir, nir_shader_intrinsics_pass,
                allow_speculative_load, nir_metadata_all, &free_halves);

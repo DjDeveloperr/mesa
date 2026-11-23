@@ -9,6 +9,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "agx_abi.h"
 #include "hk_cmd_buffer.h"
 #include "hk_descriptor_set_layout.h"
 #include "hk_device.h"
@@ -129,7 +130,20 @@ correctness(struct fixture *f)
    bind(f, 32, VK_SHADER_STAGE_ALL_GRAPHICS);
    CHECK(cmd->state.gfx.descriptors.root.set_dynamic_buffer_start[0] == 1);
    CHECK(cmd->state.gfx.descriptors.root.dynamic_buffers[1].base_addr == 0x400020);
+   CHECK(cmd->state.gfx.descriptors.root.dynamic_buffers[1].size == 4096);
    f->layout.dynamic_descriptor_offset[0] = 0;
+   /* VK_WHOLE_SIZE dynamic bindings shrink their bound size by the offset. */
+   BITSET_SET(f->set->dynamic_buffer_whole_size, 0);
+   bind(f, 64, VK_SHADER_STAGE_ALL_GRAPHICS);
+   CHECK(cmd->state.gfx.descriptors.root.dynamic_buffers[0].base_addr == 0x400040);
+   CHECK(cmd->state.gfx.descriptors.root.dynamic_buffers[0].size == 4096 - 64);
+   bind(f, 4096, VK_SHADER_STAGE_ALL_GRAPHICS);
+   CHECK(cmd->state.gfx.descriptors.root.dynamic_buffers[0].base_addr ==
+         AGX_ZERO_PAGE_ADDRESS);
+   CHECK(cmd->state.gfx.descriptors.root.dynamic_buffers[0].size == 0);
+   BITSET_CLEAR(f->set->dynamic_buffer_whole_size, 0);
+   bind(f, 32, VK_SHADER_STAGE_ALL_GRAPHICS);
+   CHECK(cmd->state.gfx.descriptors.root.dynamic_buffers[0].size == 4096);
    hk_cmd_upload_draw_params(cmd, (uint32_t)-7, 3);
    uint64_t params = cmd->state.gfx.draw_params;
    const uint32_t *data = (uint32_t *)((uint8_t *)f->main_map + params - 0x100000);

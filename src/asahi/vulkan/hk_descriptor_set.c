@@ -623,11 +623,16 @@ write_dynamic_buffer_desc(struct hk_descriptor_set *set,
 {
    const struct hk_descriptor_set_binding_layout *binding_layout =
       &set->layout->binding[binding];
+   const uint32_t dyn_idx = binding_layout->dynamic_buffer_index + elem;
+   assert(dyn_idx < HK_MAX_DYNAMIC_BUFFERS);
 
-   struct hk_buffer_address *desc =
-      &set->dynamic_buffers[binding_layout->dynamic_buffer_index + elem];
+   struct hk_buffer_address *desc = &set->dynamic_buffers[dyn_idx];
 
    *desc = get_buffer_address(info, read_only);
+   if (info->buffer != VK_NULL_HANDLE && info->range == VK_WHOLE_SIZE)
+      BITSET_SET(set->dynamic_buffer_whole_size, dyn_idx);
+   else
+      BITSET_CLEAR(set->dynamic_buffer_whole_size, dyn_idx);
 }
 
 static void
@@ -772,6 +777,12 @@ hk_copy_descriptor_sets(uint32_t descriptorCopyCount,
          typed_memcpy(&dst->dynamic_buffers[dst_dyn_start],
                       &src->dynamic_buffers[src_dyn_start],
                       copy->descriptorCount);
+         for (uint32_t j = 0; j < copy->descriptorCount; j++) {
+            if (BITSET_TEST(src->dynamic_buffer_whole_size, src_dyn_start + j))
+               BITSET_SET(dst->dynamic_buffer_whole_size, dst_dyn_start + j);
+            else
+               BITSET_CLEAR(dst->dynamic_buffer_whole_size, dst_dyn_start + j);
+         }
       }
    }
 }

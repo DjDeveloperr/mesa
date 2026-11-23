@@ -14,6 +14,7 @@
 #include "vk_descriptor_update_template.h"
 #include "vk_object.h"
 
+#include "util/bitset.h"
 #include "util/list.h"
 #include "util/vma.h"
 
@@ -131,6 +132,10 @@ struct hk_descriptor_set {
    uint32_t size;
    /* mapped_ptr is in a CPU-cached pool BO (hk_descriptor_pool::cpu_cached). */
    bool cpu_cached;
+
+   /* Dynamic buffer entries written with VK_WHOLE_SIZE whose effective range
+    * shrinks by pDynamicOffsets at bind time. */
+   BITSET_DECLARE(dynamic_buffer_whole_size, HK_MAX_DYNAMIC_BUFFERS);
 
    struct hk_buffer_address dynamic_buffers[];
 };
