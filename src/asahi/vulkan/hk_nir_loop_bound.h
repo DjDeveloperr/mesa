@@ -39,7 +39,9 @@ hk_nir_loop_binding_add(struct hk_nir_loop_binding_list *list,
 }
 
 struct hk_nir_lb_builder {
-   struct hk_pack_loop_bound *out;
+   struct hk_pack_loop_op *ops;
+   uint8_t *count;
+   uint8_t max_ops;
    const struct hk_nir_loop_param_binding *bindings;
    unsigned num_bindings;
    bool failed;
@@ -50,18 +52,18 @@ hk_nir_lb_emit(struct hk_nir_lb_builder *b, struct hk_pack_loop_op op)
 {
    if (b->failed)
       return -1;
-   for (uint8_t i = 0; i < b->out->count; ++i) {
-      const struct hk_pack_loop_op *e = &b->out->ops[i];
+   for (uint8_t i = 0; i < *b->count; ++i) {
+      const struct hk_pack_loop_op *e = &b->ops[i];
       if (e->kind == op.kind && e->lhs == op.lhs && e->rhs == op.rhs &&
           e->imm == op.imm)
          return (int)i;
    }
-   if (b->out->count >= HK_PACK_LOOP_MAX_OPS) {
+   if (*b->count >= b->max_ops) {
       b->failed = true;
       return -1;
    }
-   const int idx = (int)b->out->count++;
-   b->out->ops[idx] = op;
+   const int idx = (int)(*b->count)++;
+   b->ops[idx] = op;
    return idx;
 }
 
@@ -86,7 +88,7 @@ hk_nir_lb_is_const(const struct hk_nir_lb_builder *b, int idx, uint32_t *imm_out
 {
    if (idx < 0 || b->failed)
       return false;
-   const struct hk_pack_loop_op op = b->out->ops[idx];
+   const struct hk_pack_loop_op op = b->ops[idx];
    if (op.kind != HK_PACK_LOOP_OP_CONST)
       return false;
    if (imm_out)
@@ -359,10 +361,73 @@ hk_nir_lb_walk_list(struct hk_nir_lb_builder *b, const struct exec_list *cf_list
    return total;
 }
 
+static inline uint32_t
+hk_nir_lb_block_weight(const nir_block *blk)
+{
+   uint32_t w = 0;
+   nir_foreach_instr(instr, blk) {
+      switch (instr->type) {
+      case nir_instr_type_alu:
+      case nir_instr_type_tex:
+      case nir_instr_type_jump:
+         w++;
+         break;
+      case nir_instr_type_intrinsic: {
+         const nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+         if (intrin->intrinsic == nir_intrinsic_cmat_muladd_agx ||
+             intrin->intrinsic == nir_intrinsic_barrier)
+            w += 4;
+         else
+            w++;
+         break;
+      }
+      default:
+         break;
+      }
+   }
+   return w;
+}
+
+static inline int
+hk_nir_lb_walk_work_list(struct hk_nir_lb_builder *b,
+                         const struct exec_list *cf_list)
+{
+   int total = hk_nir_lb_const(b, 0);
+   foreach_list_typed(nir_cf_node, cf, node, cf_list) {
+      if (b->failed)
+         return -1;
+      if (cf->type == nir_cf_node_block) {
+         const uint32_t w = hk_nir_lb_block_weight(nir_cf_node_as_block(cf));
+         if (w > 0)
+            total = hk_nir_lb_add(b, total, hk_nir_lb_const(b, w));
+      } else if (cf->type == nir_cf_node_if) {
+         nir_if *nif = nir_cf_node_as_if(cf);
+         const int t = hk_nir_lb_walk_work_list(b, &nif->then_list);
+         const int e = hk_nir_lb_walk_work_list(b, &nif->else_list);
+         total = hk_nir_lb_add(b, total, hk_nir_lb_max(b, t, e));
+      } else if (cf->type == nir_cf_node_loop) {
+         nir_loop *loop = nir_cf_node_as_loop(cf);
+         const int trips = hk_nir_lb_loop_trips(b, loop);
+         const int body = hk_nir_lb_walk_work_list(b, &loop->body);
+         const nir_block *hdr = nir_loop_first_block(loop);
+         const uint32_t hdr_w = hk_nir_lb_block_weight(hdr) + 1u;
+         const int loop_work =
+            hk_nir_lb_add(b, hk_nir_lb_mul(b, trips, body),
+                          hk_nir_lb_const(b, hdr_w));
+         total = hk_nir_lb_add(b, total, loop_work);
+      } else {
+         b->failed = true;
+         return -1;
+      }
+   }
+   return total;
+}
+
 /* Analyze the emitted NIR control-flow tree and populate `out` with an
- * expression computing worst-case (total loop back-edges + 1). Fails closed
- * (out->valid = false) if any loop cannot be bounded statically or via a
- * verified dynamic parameter binding. */
+ * expression computing worst-case (total loop back-edges + 1), plus a
+ * CF-weighted dynamic executable NIR op bound (`work_ops` / `static_nir_ops`).
+ * Fails closed (`out->valid = false`) if any loop cannot be bounded statically
+ * or via a verified dynamic parameter binding. */
 static inline bool
 hk_nir_compute_pack_loop_bound(nir_shader *nir,
                                const struct hk_nir_loop_param_binding *bindings,
@@ -380,7 +445,9 @@ hk_nir_compute_pack_loop_bound(nir_shader *nir,
       return false;
 
    struct hk_nir_lb_builder b = {
-      .out = out,
+      .ops = out->ops,
+      .count = &out->count,
+      .max_ops = HK_PACK_LOOP_MAX_OPS,
       .bindings = bindings,
       .num_bindings = num_bindings,
       .failed = false,
@@ -403,5 +470,42 @@ hk_nir_compute_pack_loop_bound(nir_shader *nir,
       out->count++;
    }
    out->valid = true;
+
+   /* Best-effort CF-weighted executable NIR op bound (falls back cleanly to
+    * back-edges + 1 if work_ops exceeds HK_PACK_LOOP_WORK_MAX_OPS). */
+   uint64_t static_ops = 0;
+   nir_foreach_block(blk, impl) {
+      static_ops += hk_nir_lb_block_weight(blk);
+   }
+   if (static_ops > 0 && static_ops <= UINT32_MAX) {
+      struct hk_nir_lb_builder wb = {
+         .ops = out->work_ops,
+         .count = &out->work_count,
+         .max_ops = HK_PACK_LOOP_WORK_MAX_OPS,
+         .bindings = bindings,
+         .num_bindings = num_bindings,
+         .failed = false,
+      };
+      const int work = hk_nir_lb_walk_work_list(&wb, &impl->body);
+      if (!wb.failed && work >= 0 && out->work_count > 0) {
+         bool ok = true;
+         if (work != (int)out->work_count - 1) {
+            if (out->work_count >= HK_PACK_LOOP_WORK_MAX_OPS) {
+               ok = false;
+            } else {
+               out->work_ops[out->work_count] = out->work_ops[work];
+               out->work_count++;
+            }
+         }
+         if (ok) {
+            out->static_nir_ops = (uint32_t)static_ops;
+            out->work_valid = true;
+         } else {
+            out->work_count = 0;
+         }
+      } else {
+         out->work_count = 0;
+      }
+   }
    return true;
 }

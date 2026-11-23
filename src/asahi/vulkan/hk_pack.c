@@ -42,9 +42,9 @@
  * work stays within HK_PACK_MAX_STATIC_WORK; on overflow or excess work,
  * saturate and fall back to pack_loops. */
 bool
-hk_pack_account_dispatch_work(uint64_t threads, uint64_t instrs,
-                              bool has_loops, uint64_t loop_bound,
-                              uint64_t *work_out)
+hk_pack_account_dispatch_work_eff(uint64_t threads, uint64_t instrs,
+                                  bool has_loops, uint64_t eff_instrs,
+                                  uint64_t *work_out)
 {
    uint64_t work = 0;
    if (__builtin_mul_overflow(threads, instrs, &work))
@@ -55,9 +55,9 @@ hk_pack_account_dispatch_work(uint64_t threads, uint64_t instrs,
       return false;
    }
 
-   if (loop_bound > 0) {
+   if (eff_instrs > 0) {
       uint64_t bounded = 0;
-      if (!__builtin_mul_overflow(work, loop_bound, &bounded) &&
+      if (!__builtin_mul_overflow(threads, eff_instrs, &bounded) &&
           bounded <= HK_PACK_MAX_STATIC_WORK) {
          *work_out = bounded;
          return false;
@@ -68,6 +68,24 @@ hk_pack_account_dispatch_work(uint64_t threads, uint64_t instrs,
 
    *work_out = work;
    return true;
+}
+
+bool
+hk_pack_account_dispatch_work(uint64_t threads, uint64_t instrs,
+                              bool has_loops, uint64_t loop_bound,
+                              uint64_t *work_out)
+{
+   if (!has_loops || loop_bound == 0)
+      return hk_pack_account_dispatch_work_eff(threads, instrs, has_loops, 0,
+                                               work_out);
+
+   uint64_t eff_instrs = 0;
+   if (__builtin_mul_overflow(instrs, loop_bound, &eff_instrs)) {
+      *work_out = UINT64_MAX;
+      return true;
+   }
+   return hk_pack_account_dispatch_work_eff(threads, instrs, true, eff_instrs,
+                                            work_out);
 }
 
 /* Re-check a packed run's work and unbounded-loop limits before submit-time

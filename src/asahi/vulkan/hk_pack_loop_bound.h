@@ -35,28 +35,39 @@ struct hk_pack_loop_op {
 };
 
 #define HK_PACK_LOOP_MAX_OPS 64u
+#define HK_PACK_LOOP_WORK_MAX_OPS 128u
 
-/* Post-order expression for worst-case (total loop back-edges + 1), derived
- * directly from the emitted NIR control-flow tree. valid == false means at
- * least one loop could not be bounded statically, forcing pack_loops = true. */
+/* Post-order expressions derived directly from the emitted NIR control-flow
+ * tree:
+ * - ops[0..count): worst-case (total loop back-edges + 1). valid == false means
+ *   at least one loop could not be bounded statically, forcing pack_loops.
+ * - work_ops[0..work_count): worst-case dynamic weighted executable NIR ops
+ *   along any control-flow path, paired with static_nir_ops (sum across all
+ *   blocks) to tighten per-thread instruction bounds for multi-branch shaders
+ *   without underestimating loop work. */
 struct hk_pack_loop_bound {
    bool valid;
+   bool work_valid;
    uint8_t count;
+   uint8_t work_count;
+   uint32_t static_nir_ops;
    struct hk_pack_loop_op ops[HK_PACK_LOOP_MAX_OPS];
+   struct hk_pack_loop_op work_ops[HK_PACK_LOOP_WORK_MAX_OPS];
 };
 
 static inline bool
-hk_pack_eval_loop_bound(const struct hk_pack_loop_bound *lb,
-                        const uint64_t params[HK_PACK_LOOP_PARAM_COUNT],
-                        uint64_t *bound_out)
+hk_pack_eval_ops(const struct hk_pack_loop_op *ops, uint8_t count,
+                 uint8_t max_ops,
+                 const uint64_t params[HK_PACK_LOOP_PARAM_COUNT],
+                 uint64_t *val_out)
 {
-   *bound_out = 0;
-   if (!lb || !lb->valid || lb->count == 0 || lb->count > HK_PACK_LOOP_MAX_OPS)
+   *val_out = 0;
+   if (!ops || count == 0 || count > max_ops || max_ops > HK_PACK_LOOP_WORK_MAX_OPS)
       return false;
 
-   uint64_t vals[HK_PACK_LOOP_MAX_OPS];
-   for (uint8_t i = 0; i < lb->count; ++i) {
-      const struct hk_pack_loop_op op = lb->ops[i];
+   uint64_t vals[HK_PACK_LOOP_WORK_MAX_OPS];
+   for (uint8_t i = 0; i < count; ++i) {
+      const struct hk_pack_loop_op op = ops[i];
       uint64_t v = 0;
       switch (op.kind) {
       case HK_PACK_LOOP_OP_CONST:
@@ -88,9 +99,85 @@ hk_pack_eval_loop_bound(const struct hk_pack_loop_bound *lb,
       vals[i] = v;
    }
 
-   const uint64_t res = vals[lb->count - 1];
-   if (res == 0)
+   *val_out = vals[count - 1];
+   return true;
+}
+
+static inline bool
+hk_pack_eval_loop_bound(const struct hk_pack_loop_bound *lb,
+                        const uint64_t params[HK_PACK_LOOP_PARAM_COUNT],
+                        uint64_t *bound_out)
+{
+   *bound_out = 0;
+   if (!lb || !lb->valid)
+      return false;
+   uint64_t res = 0;
+   if (!hk_pack_eval_ops(lb->ops, lb->count, HK_PACK_LOOP_MAX_OPS, params, &res) ||
+       res == 0)
       return false;
    *bound_out = res;
+   return true;
+}
+
+static inline bool
+hk_pack_eval_work_bound(const struct hk_pack_loop_bound *lb,
+                        const uint64_t params[HK_PACK_LOOP_PARAM_COUNT],
+                        uint64_t *dyn_nir_ops_out)
+{
+   *dyn_nir_ops_out = 0;
+   if (!lb || !lb->valid || !lb->work_valid || lb->static_nir_ops == 0)
+      return false;
+   uint64_t res = 0;
+   if (!hk_pack_eval_ops(lb->work_ops, lb->work_count, HK_PACK_LOOP_WORK_MAX_OPS,
+                         params, &res) ||
+       res == 0)
+      return false;
+   *dyn_nir_ops_out = res;
+   return true;
+}
+
+/* Compute an upper bound on per-thread AGX instructions for a bounded looping
+ * shader. Always requires a valid loop back-edge bound (`lb->valid`); when the
+ * CF-weighted NIR work bound is also available, scales `agx_instrs` by
+ * ceil(2 * dyn_nir_ops / static_nir_ops) (clamped to [agx_instrs, agx_instrs *
+ * loop_bound]) so cold mutually-exclusive paths do not multiply loop trips. */
+static inline bool
+hk_pack_eval_effective_instrs(const struct hk_pack_loop_bound *lb,
+                              uint64_t agx_instrs,
+                              const uint64_t params[HK_PACK_LOOP_PARAM_COUNT],
+                              uint64_t *eff_instrs_out)
+{
+   *eff_instrs_out = 0;
+   if (!agx_instrs)
+      return false;
+
+   uint64_t loop_bound = 0;
+   if (!hk_pack_eval_loop_bound(lb, params, &loop_bound))
+      return false;
+
+   uint64_t naive = 0;
+   const bool naive_ok = !__builtin_mul_overflow(agx_instrs, loop_bound, &naive);
+
+   uint64_t dyn_nir_ops = 0;
+   if (hk_pack_eval_work_bound(lb, params, &dyn_nir_ops)) {
+      const __uint128_t num = (__uint128_t)2u * (__uint128_t)agx_instrs *
+                              (__uint128_t)dyn_nir_ops;
+      const __uint128_t scaled =
+         (num + (__uint128_t)lb->static_nir_ops - 1u) /
+         (__uint128_t)lb->static_nir_ops;
+      if (scaled <= UINT64_MAX) {
+         uint64_t eff = (uint64_t)scaled;
+         if (eff < agx_instrs)
+            eff = agx_instrs;
+         if (naive_ok && eff > naive)
+            eff = naive;
+         *eff_instrs_out = eff;
+         return true;
+      }
+   }
+
+   if (!naive_ok)
+      return false;
+   *eff_instrs_out = naive;
    return true;
 }

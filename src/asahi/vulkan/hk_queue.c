@@ -3091,14 +3091,16 @@ hk_pack_runs(struct hk_device *dev, const struct hk_queue *queue,
                   }
                }
 
-               uint64_t fused_bound = 0;
+               uint64_t fused_eff_instrs = 0;
                if (params_ok)
-                  hk_pack_eval_loop_bound(&cand->pack_loop_bound, fused_params,
-                                          &fused_bound);
+                  hk_pack_eval_effective_instrs(&cand->pack_loop_bound,
+                                                cand->b.info.stats.instrs,
+                                                fused_params,
+                                                &fused_eff_instrs);
                uint64_t fused_work = 0;
-               const bool fused_loops = hk_pack_account_dispatch_work(
+               const bool fused_loops = hk_pack_account_dispatch_work_eff(
                   fused_threads, cand->b.info.stats.instrs,
-                  cand->b.info.has_loops, fused_bound, &fused_work);
+                  cand->b.info.has_loops, fused_eff_instrs, &fused_work);
 
                if (!hk_pack_fusion_fits_run(run_work, run_loops,
                                             replaced_work, replaced_loops,

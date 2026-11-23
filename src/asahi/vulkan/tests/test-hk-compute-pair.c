@@ -2027,10 +2027,13 @@ test_nir_derived_pack_loop_bounds(void)
       uint64_t params[HK_PACK_LOOP_PARAM_COUNT] = {0};
       params[HK_PACK_LOOP_PARAM_DW_KH] = 3;
       params[HK_PACK_LOOP_PARAM_DW_KW] = 3;
-      uint64_t bound = 0;
+      uint64_t bound = 0, eff = 0;
       HK_EVAL_CHECK(hk_pack_eval_loop_bound(&lb, params, &bound));
       /* ky (3) * (1 + kx (3)) + 1 = 13 back-edges + 1 */
       HK_EVAL_CHECK(bound == 3ull * 3ull + 3ull + 1ull);
+      HK_EVAL_CHECK(lb.work_valid && lb.static_nir_ops > 0);
+      HK_EVAL_CHECK(hk_pack_eval_effective_instrs(&lb, 469, params, &eff));
+      HK_EVAL_CHECK(eff >= 469 && eff < 469 * bound);
 
       const size_t in_n = (size_t)cfg.in_h * cfg.in_w * cfg.channels;
       const size_t wt_n = (size_t)cfg.ker_h * cfg.ker_w * cfg.channels;

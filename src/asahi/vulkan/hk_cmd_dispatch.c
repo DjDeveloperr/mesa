@@ -3464,7 +3464,9 @@ hk_select_im2col_vec4(struct hk_cmd_buffer *cmd, struct hk_api_shader *api,
    if (loop_bound_out) {
       uint64_t params[HK_PACK_LOOP_PARAM_COUNT] = {0};
       params[HK_PACK_LOOP_PARAM_IM2COL_KH] = kh;
-      hk_pack_eval_loop_bound(&alt->pack_loop_bound, params, loop_bound_out);
+      hk_pack_eval_effective_instrs(&alt->pack_loop_bound,
+                                    alt->b.info.stats.instrs, params,
+                                    loop_bound_out);
    }
    return alt;
 }
@@ -3812,8 +3814,9 @@ hk_select_depthwise_vec4(struct hk_cmd_buffer *cmd, struct hk_api_shader *api,
       pack_loop_params[HK_PACK_LOOP_PARAM_DW_KW] = (uint32_t)kw;
    }
    if (loop_bound_out && pack_loop_params)
-      hk_pack_eval_loop_bound(&alt->pack_loop_bound, pack_loop_params,
-                              loop_bound_out);
+      hk_pack_eval_effective_instrs(&alt->pack_loop_bound,
+                                    alt->b.info.stats.instrs, pack_loop_params,
+                                    loop_bound_out);
    return alt;
 }
 
@@ -3983,8 +3986,9 @@ hk_select_gemm_cmat(struct hk_cmd_buffer *cmd, struct hk_api_shader *api,
          DIV_ROUND_UP(k_u, k_step);
    }
    if (loop_bound_out && pack_loop_params)
-      hk_pack_eval_loop_bound(&alt->pack_loop_bound, pack_loop_params,
-                              loop_bound_out);
+      hk_pack_eval_effective_instrs(&alt->pack_loop_bound,
+                                    alt->b.info.stats.instrs, pack_loop_params,
+                                    loop_bound_out);
    return alt;
 }
 
@@ -4124,7 +4128,7 @@ dispatch_grid(struct hk_cmd_buffer *cmd, struct agx_grid grid, bool in_threads)
        * emitted NIR loop structure has a validated trip bound scaled into work);
        * pack_loops marks unbounded looping dispatches, at most one per packet. */
       uint64_t work = 0;
-      cs->pack_loops |= hk_pack_account_dispatch_work(
+      cs->pack_loops |= hk_pack_account_dispatch_work_eff(
          threads, selected->b.info.stats.instrs,
          selected->b.info.has_loops, loop_bound, &work);
       cs->pack_threads = threads > UINT64_MAX - cs->pack_threads

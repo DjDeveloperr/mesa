@@ -1409,11 +1409,18 @@ main(void)
         hk_pack_account_dispatch_work(1ull << 24, 256, true, 16, &w) && w == UINT64_MAX);
       T("overflowing bounded loop sets pack_loops and saturates",
         hk_pack_account_dispatch_work(UINT64_MAX / 2, 4, true, 4, &w) && w == UINT64_MAX);
+      T("effective-instr bounded looping dispatch scales work directly",
+        !hk_pack_account_dispatch_work_eff(1024, 500, true, 800, &w) && w == 1024ull * 800);
+      T("effective-instr zero fails closed to pack_loops",
+        hk_pack_account_dispatch_work_eff(1024, 500, true, 0, &w) && w == 1024ull * 500);
 
       /* Expression evaluator: max(3, kh * (1 + kw)) */
       struct hk_pack_loop_bound lb = {
          .valid = true,
+         .work_valid = true,
          .count = 7,
+         .work_count = 3,
+         .static_nir_ops = 400,
          .ops = {
             [0] = { .kind = HK_PACK_LOOP_OP_CONST, .imm = 3 },
             [1] = { .kind = HK_PACK_LOOP_OP_PARAM, .imm = HK_PACK_LOOP_PARAM_DW_KH },
@@ -1423,20 +1430,37 @@ main(void)
             [5] = { .kind = HK_PACK_LOOP_OP_MUL, .lhs = 1, .rhs = 4 },
             [6] = { .kind = HK_PACK_LOOP_OP_MAX, .lhs = 0, .rhs = 5 },
          },
+         .work_ops = {
+            [0] = { .kind = HK_PACK_LOOP_OP_PARAM, .imm = HK_PACK_LOOP_PARAM_DW_KH },
+            [1] = { .kind = HK_PACK_LOOP_OP_CONST, .imm = 100 },
+            [2] = { .kind = HK_PACK_LOOP_OP_MUL, .lhs = 0, .rhs = 1 },
+         },
       };
       uint64_t params[HK_PACK_LOOP_PARAM_COUNT] = {0};
       params[HK_PACK_LOOP_PARAM_DW_KH] = 3;
       params[HK_PACK_LOOP_PARAM_DW_KW] = 3;
-      uint64_t bval = 0;
+      uint64_t bval = 0, eff = 0;
       T("eval nested depthwise back-edges expression",
         hk_pack_eval_loop_bound(&lb, params, &bval) && bval == 12);
+      T("eval CF-weighted effective instrs tightens multi-branch bound",
+        hk_pack_eval_effective_instrs(&lb, 400, params, &eff) &&
+        eff == 600 && eff < 400 * bval);
+      lb.work_valid = false;
+      T("eval effective instrs falls back to agx_instrs * loop_bound without work_ops",
+        hk_pack_eval_effective_instrs(&lb, 400, params, &eff) &&
+        eff == 400 * bval);
+      lb.work_valid = true;
       params[HK_PACK_LOOP_PARAM_DW_KH] = UINT64_MAX;
       params[HK_PACK_LOOP_PARAM_DW_KW] = 2;
       T("eval rejects overflow cleanly",
         !hk_pack_eval_loop_bound(&lb, params, &bval) && bval == 0);
+      T("eval effective instrs rejects overflow cleanly",
+        !hk_pack_eval_effective_instrs(&lb, 400, params, &eff) && eff == 0);
       lb.valid = false;
       T("eval rejects invalid loop bound",
         !hk_pack_eval_loop_bound(&lb, params, &bval) && bval == 0);
+      T("eval effective instrs rejects invalid loop bound",
+        !hk_pack_eval_effective_instrs(&lb, 400, params, &eff) && eff == 0);
 
       /* Post-fusion run re-accounting (e.g. DUAL_PAD4 zero-fill loop). */
       uint64_t nw = 0;

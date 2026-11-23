@@ -89,6 +89,10 @@ bool hk_pack_account_dispatch_work(uint64_t threads, uint64_t instrs,
                                    bool has_loops, uint64_t loop_bound,
                                    uint64_t *work_out);
 
+bool hk_pack_account_dispatch_work_eff(uint64_t threads, uint64_t instrs,
+                                       bool has_loops, uint64_t eff_instrs,
+                                       uint64_t *work_out);
+
 bool hk_pack_fusion_fits_run(uint64_t run_work, unsigned run_loops,
                              uint64_t replaced_work, unsigned replaced_loops,
                              uint64_t fused_work, bool fused_loops,
