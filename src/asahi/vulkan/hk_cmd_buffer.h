@@ -355,35 +355,86 @@ hk_root_reads_of(uint64_t start_B, uint64_t end_B)
    return reads;
 }
 
-/* Whether two roots agree on every byte outside the hidden spans. */
+/* The descriptor set slots [0, HK_MAX_SETS) whose root pointers overlap
+ * [start_B, end_B). */
+static inline uint16_t
+hk_root_set_reads_of(uint64_t start_B, uint64_t end_B)
+{
+   static_assert(HK_MAX_SETS <= 16, "agx3_root_set_reads is a 16-bit mask");
+   const uint64_t sets_start = hk_root_descriptor_offset(sets);
+   const uint64_t sets_end =
+      sets_start + sizeof(((struct hk_root_descriptor_table *)0)->sets);
+   if (start_B >= sets_end || end_B <= sets_start)
+      return 0;
+
+   const uint64_t lo = MAX2(start_B, sets_start) - sets_start;
+   const uint64_t hi = MIN2(end_B, sets_end) - sets_start;
+   const unsigned first = lo / sizeof(uint64_t);
+   const unsigned last = (hi - 1) / sizeof(uint64_t);
+   uint16_t mask = 0;
+   for (unsigned s = first; s <= last; ++s)
+      mask |= BITFIELD_BIT(s);
+   return mask;
+}
+
+static inline uint16_t
+hk_root_diff_sets(const uint64_t *a, const uint64_t *b)
+{
+   uint16_t diff = 0;
+   for (unsigned s = 0; s < HK_MAX_SETS; ++s) {
+      if (a[s] != b[s])
+         diff |= BITFIELD_BIT(s);
+   }
+   return diff;
+}
+
+/* Whether two roots agree on every byte outside the hidden spans and sets[]. */
 static inline bool
-hk_root_matches_for_fragment(const struct hk_root_descriptor_table *a,
-                             const struct hk_root_descriptor_table *b)
+hk_root_matches_non_sets(const struct hk_root_descriptor_table *a,
+                         const struct hk_root_descriptor_table *b)
 {
    size_t at = 0;
 #define HK_ROOT_COMPARE_BEFORE(from, to, class)                                \
-   if (memcmp((const uint8_t *)a + at, (const uint8_t *)b + at,                \
+   if (hk_root_descriptor_offset(from) > at &&                                 \
+       memcmp((const uint8_t *)a + at, (const uint8_t *)b + at,                \
               hk_root_descriptor_offset(from) - at))                           \
       return false;                                                            \
-   at = hk_root_descriptor_offset(to);
+   at = hk_root_descriptor_offset(to);                                         \
+   if (at == hk_root_descriptor_offset(sets))                                  \
+      at = hk_root_descriptor_offset(draw);
    HK_ROOT_FRAGMENT_HIDDEN_SPANS(HK_ROOT_COMPARE_BEFORE)
 #undef HK_ROOT_COMPARE_BEFORE
    return !memcmp((const uint8_t *)a + at, (const uint8_t *)b + at,
                   sizeof(*a) - at);
 }
 
-/* Build the same visible-byte sequence as hk_root_matches_for_fragment().
+/* Whether two roots agree on every byte outside the hidden spans and on every
+ * descriptor set pointer named in set_reads. */
+static inline bool
+hk_root_matches_for_fragment(const struct hk_root_descriptor_table *a,
+                             const struct hk_root_descriptor_table *b,
+                             uint16_t set_reads)
+{
+   return hk_root_matches_non_sets(a, b) &&
+          !(set_reads & hk_root_diff_sets(a->sets, b->sets));
+}
+
+/* Build the same visible-byte sequence as hk_root_matches_non_sets(), keeping
+ * sets[] alongside it so per-set comparisons avoid uncached root reads.
  * Keeping this derived from the shared span list includes future root fields
  * and padding without duplicating the root ABI. */
 #define HK_ROOT_FRAGMENT_SUBTRACT(from, to, class)                             \
    -(hk_root_descriptor_offset(to) - hk_root_descriptor_offset(from))
 enum {
-   HK_ROOT_FRAGMENT_VISIBLE_SIZE = sizeof(struct hk_root_descriptor_table)
-      HK_ROOT_FRAGMENT_HIDDEN_SPANS(HK_ROOT_FRAGMENT_SUBTRACT),
+   HK_ROOT_FRAGMENT_VISIBLE_SIZE =
+      sizeof(struct hk_root_descriptor_table) -
+      sizeof(((struct hk_root_descriptor_table *)0)->sets)
+         HK_ROOT_FRAGMENT_HIDDEN_SPANS(HK_ROOT_FRAGMENT_SUBTRACT),
 };
 #undef HK_ROOT_FRAGMENT_SUBTRACT
 
 struct hk_root_fragment_snapshot {
+   uint64_t sets[HK_MAX_SETS];
    uint8_t bytes[HK_ROOT_FRAGMENT_VISIBLE_SIZE];
 };
 
@@ -391,13 +442,18 @@ static inline void
 hk_root_fragment_snapshot_store(struct hk_root_fragment_snapshot *snapshot,
                                 const struct hk_root_descriptor_table *root)
 {
+   memcpy(snapshot->sets, root->sets, sizeof(snapshot->sets));
    size_t at = 0, out = 0;
 #define HK_ROOT_FRAGMENT_COPY(from, to, class)                                 \
    do {                                                                        \
       const size_t size = hk_root_descriptor_offset(from) - at;                \
-      memcpy(snapshot->bytes + out, (const uint8_t *)root + at, size);         \
-      out += size;                                                             \
+      if (size) {                                                              \
+         memcpy(snapshot->bytes + out, (const uint8_t *)root + at, size);      \
+         out += size;                                                          \
+      }                                                                        \
       at = hk_root_descriptor_offset(to);                                      \
+      if (at == hk_root_descriptor_offset(sets))                               \
+         at = hk_root_descriptor_offset(draw);                                 \
    } while (0);
    HK_ROOT_FRAGMENT_HIDDEN_SPANS(HK_ROOT_FRAGMENT_COPY)
 #undef HK_ROOT_FRAGMENT_COPY
@@ -405,6 +461,11 @@ hk_root_fragment_snapshot_store(struct hk_root_fragment_snapshot *snapshot,
           sizeof(*root) - at);
    assert(out + sizeof(*root) - at == sizeof(snapshot->bytes));
 }
+
+static_assert(hk_root_descriptor_offset(draw) ==
+                 hk_root_descriptor_offset(sets) +
+                    sizeof(((struct hk_root_descriptor_table *)0)->sets),
+              "sets immediately precedes draw");
 
 static_assert(hk_root_descriptor_offset(draw.attrib_strides) ==
                     hk_root_descriptor_offset(draw.attrib_clamps) +
@@ -760,9 +821,11 @@ struct hk_graphics_state {
    uint64_t fs_root;
    const struct hk_root_descriptor_table *fs_root_cpu;
 
-   /* A successful equality check between the immutable root snapshots at
-    * fs_root and this address. Cleared whenever fs_root is replaced. */
+   /* A successful non-set equality check between the immutable root snapshots
+    * at fs_root and this address, together with the bitmask of sets[] slots
+    * that differed. Cleared whenever fs_root is replaced. */
    uint64_t fs_root_checked_root;
+   uint16_t fs_root_checked_diff_sets;
 
    /* CPU-cached copies of exactly the fragment-visible published bytes. The
     * pointer keys name the immutable GPU-mapped copies, never their contents. */
@@ -999,10 +1062,11 @@ hk_root_fragment_snapshot_publish(struct hk_graphics_state *gfx,
 
 /* Select the same immutable root as the fresh byte comparison. Hidden reads
  * always use the current root; snapshots and the positive identity memo only
- * accelerate the equality check for shaders that cannot observe those bytes. */
+ * accelerate the equality check for shaders that cannot observe those bytes,
+ * checking only the descriptor set pointers named in set_reads. */
 static inline uint64_t
 hk_m5_fragment_root_select(struct hk_graphics_state *gfx, uint8_t root_reads,
-                           bool use_memo, bool use_shadow)
+                           uint16_t set_reads, bool use_memo, bool use_shadow)
 {
    const uint8_t hidden = HK_ROOT_READS_ADDRESS | HK_ROOT_READS_VERTEX_INPUT |
                           HK_ROOT_READS_DYNAMIC_BUFFERS;
@@ -1012,17 +1076,30 @@ hk_m5_fragment_root_select(struct hk_graphics_state *gfx, uint8_t root_reads,
                        gfx->fs_root_fragment_snapshot_cpu == gfx->fs_root_cpu;
 
    if (gfx->fs_root && gfx->fs_root != gfx->root && gfx->root_cpu &&
-       !(root_reads & hidden) &&
-       ((use_memo && gfx->fs_root_checked_root &&
-         gfx->fs_root_checked_root == gfx->root) ||
-        (shadow
-            ? !memcmp(&gfx->fs_root_fragment_snapshot,
-                      &gfx->root_fragment_snapshot,
-                      sizeof(gfx->root_fragment_snapshot))
-            : hk_root_matches_for_fragment(gfx->fs_root_cpu, gfx->root_cpu)))) {
-      if (use_memo)
-         gfx->fs_root_checked_root = gfx->root;
-      return gfx->fs_root;
+       !(root_reads & hidden)) {
+      if (use_memo && gfx->fs_root_checked_root &&
+          gfx->fs_root_checked_root == gfx->root) {
+         if (!(set_reads & gfx->fs_root_checked_diff_sets))
+            return gfx->fs_root;
+      } else if (shadow
+                    ? !memcmp(gfx->fs_root_fragment_snapshot.bytes,
+                              gfx->root_fragment_snapshot.bytes,
+                              sizeof(gfx->root_fragment_snapshot.bytes))
+                    : hk_root_matches_non_sets(gfx->fs_root_cpu,
+                                               gfx->root_cpu)) {
+         const uint64_t *a_sets = shadow ? gfx->fs_root_fragment_snapshot.sets
+                                         : gfx->fs_root_cpu->sets;
+         const uint64_t *b_sets = shadow ? gfx->root_fragment_snapshot.sets
+                                         : gfx->root_cpu->sets;
+         const uint16_t diff_sets = hk_root_diff_sets(a_sets, b_sets);
+         if (!(set_reads & diff_sets)) {
+            if (use_memo) {
+               gfx->fs_root_checked_root = gfx->root;
+               gfx->fs_root_checked_diff_sets = diff_sets;
+            }
+            return gfx->fs_root;
+         }
+      }
    }
 
    if (use_shadow && gfx->root_cpu &&
@@ -1034,6 +1111,7 @@ hk_m5_fragment_root_select(struct hk_graphics_state *gfx, uint8_t root_reads,
    }
 
    gfx->fs_root_checked_root = 0;
+   gfx->fs_root_checked_diff_sets = 0;
    gfx->fs_root = gfx->root;
    gfx->fs_root_cpu = gfx->root_cpu;
    return gfx->root;

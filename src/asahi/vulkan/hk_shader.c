@@ -4025,68 +4025,91 @@ hk_nir_constant_offset(nir_scalar s, unsigned depth, uint64_t *value)
    return true;
 }
 
-/* The HK_ROOT_READS_* classes of the root bytes one use of load_root_agx can
- * read: an immediate offset loaded as is falls in the classes of its bytes,
- * anything else could read any byte. */
+/* The HK_ROOT_READS_* classes and descriptor-set slots of the root bytes one
+ * use of load_root_agx can read: an immediate offset loaded as is falls in the
+ * classes and set slots of its bytes, anything else could read any byte. */
 static uint8_t
-hk_nir_root_use_reads(nir_src *use)
+hk_nir_root_use_reads(nir_src *use, uint16_t *set_reads)
 {
    const uint8_t any = HK_ROOT_READS_ADDRESS | HK_ROOT_READS_VERTEX_INPUT |
                        HK_ROOT_READS_DYNAMIC_BUFFERS;
+   const uint16_t all_sets = BITFIELD_MASK(HK_MAX_SETS);
    if (nir_src_is_if(use) ||
-       nir_src_use_instr(use)->type != nir_instr_type_alu)
+       nir_src_use_instr(use)->type != nir_instr_type_alu) {
+      *set_reads |= all_sets;
       return any;
+   }
 
    nir_alu_instr *add = nir_instr_as_alu(nir_src_use_instr(use));
-   if (add->op != nir_op_iadd)
+   if (add->op != nir_op_iadd) {
+      *set_reads |= all_sets;
       return any;
+   }
 
    const unsigned other = use == &add->src[0].src ? 1 : 0;
    uint64_t offset;
    if (!hk_nir_constant_offset(nir_get_scalar(add->src[other].src.ssa,
                                               add->src[other].swizzle[0]),
-                               8, &offset))
+                               8, &offset)) {
+      *set_reads |= all_sets;
       return any;
+   }
 
    uint8_t reads = 0;
    nir_foreach_use_including_if(load_use, &add->def) {
       if (nir_src_is_if(load_use) ||
-          nir_src_use_instr(load_use)->type != nir_instr_type_intrinsic)
+          nir_src_use_instr(load_use)->type != nir_instr_type_intrinsic) {
+         *set_reads |= all_sets;
          return any;
+      }
 
       nir_intrinsic_instr *load =
          nir_instr_as_intrinsic(nir_src_use_instr(load_use));
       if ((load->intrinsic != nir_intrinsic_load_global_constant &&
            load->intrinsic != nir_intrinsic_load_global) ||
-          load_use != &load->src[0])
+          load_use != &load->src[0]) {
+         *set_reads |= all_sets;
          return any;
+      }
 
-      reads |= hk_root_reads_of(
-         offset, offset + load->def.num_components * load->def.bit_size / 8);
+      const uint64_t end =
+         offset + load->def.num_components * load->def.bit_size / 8;
+      reads |= hk_root_reads_of(offset, end);
+      *set_reads |= hk_root_set_reads_of(offset, end);
    }
    return reads;
 }
 
-/* hk_shader_info::agx3_root_reads, gathered where hk_nir_uses_root() is. */
+/* hk_shader_info::agx3_root_reads and agx3_root_set_reads, gathered where
+ * hk_nir_uses_root() is, before lower_uniforms() turns load_root_agx,
+ * load_descriptor_set_agx and bindless_*_agx into preamble uniforms. */
 static uint8_t
-hk_nir_root_reads(const nir_shader *nir)
+hk_nir_root_reads(const nir_shader *nir, uint16_t *set_reads_out)
 {
    uint8_t reads = 0;
+   uint16_t set_reads = 0;
    nir_foreach_function_impl(impl, nir) {
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
-            if (instr->type != nir_instr_type_intrinsic ||
-                nir_instr_as_intrinsic(instr)->intrinsic !=
-                   nir_intrinsic_load_root_agx)
+            if (instr->type != nir_instr_type_intrinsic)
                continue;
 
-            nir_foreach_use_including_if(use,
-                                         &nir_instr_as_intrinsic(instr)->def)
-               reads |= hk_nir_root_use_reads(use);
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic == nir_intrinsic_load_root_agx) {
+               nir_foreach_use_including_if(use, &intr->def)
+                  reads |= hk_nir_root_use_reads(use, &set_reads);
+            } else if (intr->intrinsic == nir_intrinsic_load_descriptor_set_agx ||
+                       intr->intrinsic == nir_intrinsic_bindless_image_agx ||
+                       intr->intrinsic == nir_intrinsic_bindless_sampler_agx) {
+               const unsigned s = nir_intrinsic_desc_set(intr);
+               set_reads |= s < HK_MAX_SETS ? BITFIELD_BIT(s)
+                                            : BITFIELD_MASK(HK_MAX_SETS);
+            }
          }
       }
    }
 
+   *set_reads_out = set_reads;
    return reads;
 }
 
@@ -5427,8 +5450,12 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
     * push constants -- got no root range and read its push constants from
     * address 0 + offset, i.e. as zero. */
    if (agx_chip_agx3_path(dev->dev.chip)) {
+      uint16_t set_reads = 0;
       shader->info.agx3_uses_root = hk_nir_uses_root(nir);
-      shader->info.agx3_root_reads = hk_nir_root_reads(nir);
+      shader->info.agx3_root_reads = hk_nir_root_reads(nir, &set_reads);
+      if (shader->info.agx3_combined_sampler_valid)
+         set_reads |= BITFIELD_BIT(0);
+      shader->info.agx3_root_set_reads = set_reads;
    }
 
    /* Measure while root markers are still explicit. Uniform lowering loads

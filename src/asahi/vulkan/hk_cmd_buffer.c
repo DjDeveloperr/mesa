@@ -3686,6 +3686,14 @@ refused:
    return 0;
 }
 
+static inline bool
+hk_root_fragment_snapshot_equal(const struct hk_root_fragment_snapshot *a,
+                                const struct hk_root_fragment_snapshot *b)
+{
+   return !memcmp(a->sets, b->sets, sizeof(a->sets)) &&
+          !memcmp(a->bytes, b->bytes, sizeof(a->bytes));
+}
+
 /* Read the uncached mappings only for this validation oracle
  * (ASAHI_MESA_DEBUG=verify). Keep its temporary snapshot and checks out of
  * the normal recording path. */
@@ -3696,7 +3704,8 @@ hk_m5_verify_fragment_root_shadow(const struct hk_graphics_state *gfx)
    if (gfx->root_cpu) {
       hk_root_fragment_snapshot_store(&reference, gfx->root_cpu);
       if (gfx->root_fragment_snapshot_cpu != gfx->root_cpu ||
-          memcmp(&reference, &gfx->root_fragment_snapshot, sizeof(reference))) {
+          !hk_root_fragment_snapshot_equal(&reference,
+                                           &gfx->root_fragment_snapshot)) {
          mesa_loge("M5 current root snapshot mismatch");
          abort();
       }
@@ -3704,8 +3713,8 @@ hk_m5_verify_fragment_root_shadow(const struct hk_graphics_state *gfx)
    if (gfx->fs_root_cpu) {
       hk_root_fragment_snapshot_store(&reference, gfx->fs_root_cpu);
       if (gfx->fs_root_fragment_snapshot_cpu != gfx->fs_root_cpu ||
-          memcmp(&reference, &gfx->fs_root_fragment_snapshot,
-                 sizeof(reference))) {
+          !hk_root_fragment_snapshot_equal(&reference,
+                                           &gfx->fs_root_fragment_snapshot)) {
          mesa_loge("M5 prior root snapshot mismatch");
          abort();
       }
@@ -3714,10 +3723,10 @@ hk_m5_verify_fragment_root_shadow(const struct hk_graphics_state *gfx)
 
 /* The root the M5 fragment program of s follows. A root republished only
  * for bytes the fragment shader cannot read -- a per-draw dynamic offset of a
- * vertex-stage uniform buffer, a vertex buffer bind -- keeps the program the
- * stage last published, and with it the whole PPP state: that root stays
- * valid for the command buffer and holds the same bytes wherever the shader
- * reads. */
+ * vertex-stage uniform buffer, a vertex-stage descriptor set update, a vertex
+ * buffer bind -- keeps the program the stage last published, and with it the
+ * whole PPP state: that root stays valid for the command buffer and holds the
+ * same bytes wherever the shader reads. */
 static uint64_t
 hk_m5_fragment_root(struct hk_cmd_buffer *cmd, const struct hk_shader *s)
 {
@@ -3727,7 +3736,8 @@ hk_m5_fragment_root(struct hk_cmd_buffer *cmd, const struct hk_shader *s)
    if (unlikely(dev->dev.debug & AGX_DBG_VERIFY))
       hk_m5_verify_fragment_root_shadow(gfx);
 
-   return hk_m5_fragment_root_select(gfx, s->info.agx3_root_reads, true, true);
+   return hk_m5_fragment_root_select(gfx, s->info.agx3_root_reads,
+                                     s->info.agx3_root_set_reads, true, true);
 }
 
 static uint64_t
