@@ -180,19 +180,23 @@ hk_descriptor_state_fini(struct hk_cmd_buffer *cmd,
    }
 }
 
-/* Writes the stream words of the patch sites. M5 command memory is mapped
- * uncached (hk_g17p_cached_cmd_memory() is G17P-only), so the words need no
- * cache maintenance, only to be stored whole (the GPU may read the stream
- * meanwhile when the alias count leaves 0) and made visible before the
- * submission or host signal that lets the GPU run them. */
+/* Writes the stream words of the patch sites. Each word is stored whole (the
+ * GPU may read the stream meanwhile when the alias count leaves 0), cleaned
+ * when command memory is CPU-cached, and fenced before the submission or host
+ * signal that lets the GPU run them. */
 void
 hk_cmd_buffer_patch_alias_sites(struct hk_cmd_buffer *cmd)
 {
    if (p_atomic_read(&cmd->alias_patched) || !cmd->alias_sites.size)
       return;
 
-   util_dynarray_foreach(&cmd->alias_sites, struct hk_alias_site, site)
+   const bool cached =
+      hk_g17p_cached_cmd_memory(&hk_cmd_buffer_device(cmd)->dev);
+   util_dynarray_foreach(&cmd->alias_sites, struct hk_alias_site, site) {
       __atomic_store_n(site->word, site->value, __ATOMIC_RELAXED);
+      if (cached)
+         util_flush_range_no_fence(site->word, sizeof(*site->word));
+   }
 
    __sync_synchronize();
    if (util_has_cache_ops())

@@ -72,13 +72,13 @@ struct agx_device;
 struct agx_ptr;
 struct hk_device;
 
-/* G17P command-buffer memory (main/USC pools, VDM slabs, Ioto arenas) is
- * CPU-cached; recording cleans what it wrote before submission
+/* G17P and M5 command-buffer memory (main/USC pools, VDM slabs, Ioto arenas)
+ * is CPU-cached; recording cleans what it wrote before submission
  * (hk_cmd_buffer_publish_cached_uploads()). */
 static inline bool
 hk_g17p_cached_cmd_memory(const struct agx_device *dev)
 {
-   return dev->chip == AGX_CHIP_G17P && util_has_cache_ops();
+   return agx_chip_g17p_or_m5(dev->chip) && util_has_cache_ops();
 }
 
 struct hk_cmd_pool;

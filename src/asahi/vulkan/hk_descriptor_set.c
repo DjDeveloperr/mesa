@@ -1091,16 +1091,14 @@ hk_CreateDescriptorPool(VkDevice _device,
        * owner (a command slab, an upload pool, a geometry heap) left behind,
        * which is exactly the shape of a wild descriptor address.
        */
-      /* G17P: write descriptors through the CPU cache and clean what is
+      /* G17P / M5: write descriptors through the CPU cache and clean what is
        * written (hk_descriptor_set_publish()); write-combined stores of
-       * every descriptor and of the per-allocation zeroing above stalled
-       * the recording core. */
+       * every descriptor and of per-allocation zeroing stalled the recording
+       * core. */
       pool->cpu_cached = hk_g17p_cached_cmd_memory(&dev->dev);
       const enum agx_bo_flags pool_flags =
-         agx_chip_native_agx3(dev->dev.chip)
-            ? AGX_BO_ZERO_ON_REUSE |
-                 (pool->cpu_cached ? AGX_BO_WRITEBACK : 0)
-            : 0;
+         (agx_chip_native_agx3(dev->dev.chip) ? AGX_BO_ZERO_ON_REUSE : 0) |
+         (pool->cpu_cached ? AGX_BO_WRITEBACK : 0);
       pool->bo =
          agx_bo_create(&dev->dev, bo_size, 0, pool_flags, "Descriptor pool");
       if (!pool->bo) {
