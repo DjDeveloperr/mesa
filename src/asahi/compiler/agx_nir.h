@@ -61,6 +61,7 @@ bool agx_nir_lower_lea(struct nir_shader *shader);
 bool agx_nir_fuse_selects(struct nir_shader *shader);
 bool agx_nir_m5_split_or_selects(struct nir_shader *shader);
 bool agx_nir_opt_select_load(struct nir_shader *shader);
+bool agx_nir_opt_monotonic_bitmask(struct nir_shader *shader);
 bool agx_nir_opt_flatten_loads(struct nir_shader *shader, unsigned limit,
                                unsigned max_loads);
 bool agx_nir_opt_sink_loop_sample_uses(struct nir_shader *shader);

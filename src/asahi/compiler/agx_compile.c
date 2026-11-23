@@ -10654,6 +10654,16 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
     * varying, which overflowed the AGX3B register file and spilled.
     */
    NIR_PASS(addr_progress, nir, agx_nir_opt_select_load);
+   if (byte_indices || m5) {
+      bool mask_opt = false;
+      NIR_PASS(mask_opt, nir, agx_nir_opt_monotonic_bitmask);
+      if (mask_opt) {
+         NIR_PASS(_, nir, nir_opt_dead_cf);
+         NIR_PASS(_, nir, nir_opt_copy_prop);
+         NIR_PASS(_, nir, nir_opt_dce);
+         addr_progress = true;
+      }
+   }
    if (addr_progress || pre_alg_progress) {
       NIR_PASS(_, nir, nir_opt_cse);
       NIR_PASS(_, nir, nir_opt_dce);
