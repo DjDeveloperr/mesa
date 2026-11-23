@@ -577,7 +577,7 @@ hk_m5_storage_compression_eligible(const struct agx_device *dev, unsigned plane,
    if (dev->chip == AGX_CHIP_G17P)
       return false;
 
-   if (dev->chip != AGX_CHIP_G17S || plane ||
+   if (!agx_chip_g17_m5(dev->chip) || plane ||
        (info->pNext && !format_list_only) ||
        (info->flags & ~allowed_flags) ||
        info->imageType != VK_IMAGE_TYPE_2D || info->extent.depth != 1 ||

@@ -579,7 +579,7 @@ hk_m5_msaa_color_compression_eligible(enum agx_chip chip, unsigned plane,
       VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
-   if (chip != AGX_CHIP_G17S || plane != 0 || !info)
+   if (!agx_chip_g17_m5(chip) || plane != 0 || !info)
       return false;
 
    for (const void *next = info->pNext; next;) {
