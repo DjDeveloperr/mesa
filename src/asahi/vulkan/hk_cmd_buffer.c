@@ -664,11 +664,12 @@ hk_pool_cs_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
-   /* A G17P compute root consumes a whole command BO. Keep control-stream
-    * roots on their own bump cursor so allocating one cannot evict a partially
-    * used main-upload BO and move that allocator's slow path into the next
-    * application command. Ownership remains on the ordinary main BO list. */
-   struct hk_uploader *uploader = agx_chip_native_agx3(dev->dev.chip)
+   /* A native AGX3 / M5 compute root consumes a whole command BO. Keep
+    * control-stream roots on their own bump cursor so allocating one cannot
+    * evict a partially used main-upload BO and move that allocator's slow path
+    * into the next application command. Ownership remains on the ordinary main
+    * BO list. */
+   struct hk_uploader *uploader = agx_chip_native_or_m5(dev->dev.chip)
                                      ? &cmd->uploader.streams
                                      : &cmd->uploader.main;
    return hk_pool_alloc_from(cmd, uploader, size, alignment, HK_CMD_BO_MAIN);
@@ -1498,16 +1499,16 @@ hk_cmd_bind_shaders(struct vk_command_buffer *vk_cmd, uint32_t stage_count,
 
 }
 
-/* Only ordinary G17P graphics programs whose descriptor values are fetched
- * through the root/table in GPU memory qualify.  CPU-decoded combined sampler
- * programs and variant selection retain the existing publication path.
+/* Only ordinary native AGX3 / M5 graphics programs whose descriptor values are
+ * fetched through the root/table in GPU memory qualify.  CPU-decoded combined
+ * sampler programs and variant selection retain the existing publication path.
  */
 static bool
 hk_g17p_can_retain_descriptor_root(struct hk_cmd_buffer *cmd,
                                   const struct hk_descriptor_state *desc)
 {
    struct hk_graphics_state *gfx = &cmd->state.gfx;
-   if (!agx_chip_native_agx3(hk_cmd_buffer_device(cmd)->dev.chip) ||
+   if (!agx_chip_native_or_m5(hk_cmd_buffer_device(cmd)->dev.chip) ||
        desc != &gfx->descriptors ||
        gfx->shaders[MESA_SHADER_GEOMETRY] ||
        gfx->shaders[MESA_SHADER_TESS_CTRL] ||
