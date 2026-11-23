@@ -128,10 +128,9 @@ hk_cmd_upload_constants(struct hk_cmd_buffer *cmd, const struct hk_shader *s,
       return 0;
 
    assert(stage < MESA_SHADER_STAGES);
-   const bool native =
-      agx_chip_native_agx3(hk_cmd_buffer_device(cmd)->dev.chip);
-   if (native && s->constant_data_id &&
-       cmd->state.constant_data[stage].id == s->constant_data_id) {
+   if (s->constant_data_id &&
+       cmd->state.constant_data[stage].id == s->constant_data_id &&
+       agx_chip_native_or_m5(hk_cmd_buffer_device(cmd)->dev.chip)) {
       hk_upload_stat(cmd, constant_reuses, 1);
       return cmd->state.constant_data[stage].addr;
    }
@@ -154,20 +153,22 @@ hk_cmd_upload_draw_params(struct hk_cmd_buffer *cmd, uint32_t first,
                           uint32_t first_instance)
 {
    struct hk_graphics_state *gfx = &cmd->state.gfx;
-   uint32_t params[] = {first, first_instance};
-   if (agx_chip_native_agx3(hk_cmd_buffer_device(cmd)->dev.chip) &&
+   if (gfx->g17p_draw_params_value[0] == first &&
+       gfx->g17p_draw_params_value[1] == first_instance &&
        gfx->g17p_draw_params_host_valid && gfx->draw_params &&
-       memcmp(gfx->g17p_draw_params_value, params, sizeof(params)) == 0) {
+       agx_chip_native_or_m5(hk_cmd_buffer_device(cmd)->dev.chip)) {
       hk_upload_stat(cmd, draw_param_reuses, 1);
       return;
    }
 
+   uint32_t params[] = {first, first_instance};
    const uint64_t addr = hk_pool_upload(cmd, params, sizeof(params), 4);
    gfx->g17p_draw_params_host_valid = addr != 0;
    gfx->draw_params = addr;
    if (!addr)
       return;
-   memcpy(gfx->g17p_draw_params_value, params, sizeof(params));
+   gfx->g17p_draw_params_value[0] = first;
+   gfx->g17p_draw_params_value[1] = first_instance;
    hk_upload_stat(cmd, draw_param_uploads, 1);
    hk_upload_stat(cmd, draw_param_bytes, sizeof(params));
 }
@@ -176,9 +177,9 @@ void
 hk_cmd_upload_draw_id(struct hk_cmd_buffer *cmd, uint32_t draw_id)
 {
    struct hk_graphics_state *gfx = &cmd->state.gfx;
-   if (agx_chip_native_agx3(hk_cmd_buffer_device(cmd)->dev.chip) &&
+   if (gfx->g17p_draw_id_value == draw_id &&
        gfx->g17p_draw_id_host_valid && gfx->draw_id_ptr &&
-       gfx->g17p_draw_id_value == draw_id) {
+       agx_chip_native_or_m5(hk_cmd_buffer_device(cmd)->dev.chip)) {
       hk_upload_stat(cmd, draw_id_reuses, 1);
       return;
    }
