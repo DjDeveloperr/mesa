@@ -765,7 +765,8 @@ check_m5_msaa_color(void)
    i.samples = VK_SAMPLE_COUNT_4_BIT;
    for (unsigned chip = 0; chip <= AGX_CHIP_UNKNOWN; chip++)
       CHECK(hk_m5_msaa_color_compression_eligible(
-               (enum agx_chip)chip, 0, &i) == (chip == AGX_CHIP_G17S));
+               (enum agx_chip)chip, 0, &i) ==
+            agx_chip_g17_m5((enum agx_chip)chip));
    CHECK(!hk_m5_msaa_color_compression_eligible(AGX_CHIP_G17S, 1, &i));
    CHECK(!hk_m5_msaa_color_compression_eligible(AGX_CHIP_G17S, 0, NULL));
    VkImageCreateInfo c = i;
@@ -774,6 +775,11 @@ check_m5_msaa_color(void)
    /* A mutable format is admitted here; hk_can_compress() then requires a
     * format list of compatible views. Aliasing is not. */
    c = i; c.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+   CHECK(hk_m5_msaa_color_compression_eligible(AGX_CHIP_G17S, 0, &c));
+   c = i; c.flags = VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+   CHECK(hk_m5_msaa_color_compression_eligible(AGX_CHIP_G17S, 0, &c));
+   c = i; c.usage |= VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT |
+                     VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
    CHECK(hk_m5_msaa_color_compression_eligible(AGX_CHIP_G17S, 0, &c));
    c = i; c.flags = VK_IMAGE_CREATE_ALIAS_BIT;
    CHECK(!hk_m5_msaa_color_compression_eligible(AGX_CHIP_G17S, 0, &c));
