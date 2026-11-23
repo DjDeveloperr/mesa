@@ -110,6 +110,11 @@ hk_nir_lb_add(struct hk_nir_lb_builder *b, int lhs, int rhs)
       return lhs;
    if (ca && cc && (uint64_t)a + (uint64_t)c <= UINT32_MAX)
       return hk_nir_lb_const(b, a + c);
+   if (lhs > rhs) {
+      const int tmp = lhs;
+      lhs = rhs;
+      rhs = tmp;
+   }
    return hk_nir_lb_emit(b, (struct hk_pack_loop_op){
       .kind = HK_PACK_LOOP_OP_ADD, .lhs = (uint8_t)lhs, .rhs = (uint8_t)rhs,
    });
@@ -131,6 +136,11 @@ hk_nir_lb_mul(struct hk_nir_lb_builder *b, int lhs, int rhs)
       return lhs;
    if (ca && cc && (uint64_t)a * (uint64_t)c <= UINT32_MAX)
       return hk_nir_lb_const(b, a * c);
+   if (lhs > rhs) {
+      const int tmp = lhs;
+      lhs = rhs;
+      rhs = tmp;
+   }
    return hk_nir_lb_emit(b, (struct hk_pack_loop_op){
       .kind = HK_PACK_LOOP_OP_MUL, .lhs = (uint8_t)lhs, .rhs = (uint8_t)rhs,
    });
@@ -152,9 +162,140 @@ hk_nir_lb_max(struct hk_nir_lb_builder *b, int lhs, int rhs)
       return lhs;
    if (ca && cc)
       return hk_nir_lb_const(b, a >= c ? a : c);
+   if (lhs > rhs) {
+      const int tmp = lhs;
+      lhs = rhs;
+      rhs = tmp;
+   }
    return hk_nir_lb_emit(b, (struct hk_pack_loop_op){
       .kind = HK_PACK_LOOP_OP_MAX, .lhs = (uint8_t)lhs, .rhs = (uint8_t)rhs,
    });
+}
+
+/* Affine symbolic value: pure constant `c` when `node < 0`, or `ops[node] + c`
+ * when `node >= 0`. Keeping additive constants out-of-band avoids emitting
+ * dead intermediate CONST ops during CF walks, preventing op-budget overflows
+ * on multi-branch shaders. */
+struct hk_nir_lb_val {
+   int node;
+   uint64_t c;
+};
+
+static inline struct hk_nir_lb_val
+hk_nir_lb_val_const(uint64_t c)
+{
+   return (struct hk_nir_lb_val){ .node = -1, .c = c };
+}
+
+static inline int
+hk_nir_lb_val_materialize(struct hk_nir_lb_builder *b, struct hk_nir_lb_val v)
+{
+   if (b->failed)
+      return -1;
+   if (v.c > UINT32_MAX) {
+      b->failed = true;
+      return -1;
+   }
+   if (v.node < 0)
+      return hk_nir_lb_const(b, (uint32_t)v.c);
+   if (v.c == 0)
+      return v.node;
+   return hk_nir_lb_add(b, v.node, hk_nir_lb_const(b, (uint32_t)v.c));
+}
+
+static inline struct hk_nir_lb_val
+hk_nir_lb_val_add(struct hk_nir_lb_builder *b, struct hk_nir_lb_val a,
+                  struct hk_nir_lb_val d)
+{
+   if (b->failed)
+      return hk_nir_lb_val_const(0);
+   uint64_t sum_c = 0;
+   if (__builtin_add_overflow(a.c, d.c, &sum_c) || sum_c > UINT32_MAX) {
+      b->failed = true;
+      return hk_nir_lb_val_const(0);
+   }
+   if (a.node < 0 && d.node < 0)
+      return hk_nir_lb_val_const(sum_c);
+   if (a.node < 0)
+      return (struct hk_nir_lb_val){ .node = d.node, .c = sum_c };
+   if (d.node < 0)
+      return (struct hk_nir_lb_val){ .node = a.node, .c = sum_c };
+   return (struct hk_nir_lb_val){
+      .node = hk_nir_lb_add(b, a.node, d.node),
+      .c = sum_c,
+   };
+}
+
+static inline struct hk_nir_lb_val
+hk_nir_lb_val_max(struct hk_nir_lb_builder *b, struct hk_nir_lb_val a,
+                  struct hk_nir_lb_val d)
+{
+   if (b->failed)
+      return hk_nir_lb_val_const(0);
+   if (a.node < 0 && d.node < 0)
+      return hk_nir_lb_val_const(a.c >= d.c ? a.c : d.c);
+   if (a.node == d.node)
+      return (struct hk_nir_lb_val){ .node = a.node, .c = a.c >= d.c ? a.c : d.c };
+   /* All symbolic ops are non-negative, so ops[node] + c >= c. */
+   if (a.node >= 0 && d.node < 0 && d.c <= a.c)
+      return a;
+   if (d.node >= 0 && a.node < 0 && a.c <= d.c)
+      return d;
+   const uint64_t min_c = a.c < d.c ? a.c : d.c;
+   const int la = hk_nir_lb_val_materialize(
+      b, (struct hk_nir_lb_val){ .node = a.node, .c = a.c - min_c });
+   const int ld = hk_nir_lb_val_materialize(
+      b, (struct hk_nir_lb_val){ .node = d.node, .c = d.c - min_c });
+   return (struct hk_nir_lb_val){
+      .node = hk_nir_lb_max(b, la, ld),
+      .c = min_c,
+   };
+}
+
+static inline struct hk_nir_lb_val
+hk_nir_lb_val_mul(struct hk_nir_lb_builder *b, struct hk_nir_lb_val a,
+                  struct hk_nir_lb_val d)
+{
+   if (b->failed)
+      return hk_nir_lb_val_const(0);
+   if ((a.node < 0 && a.c == 0) || (d.node < 0 && d.c == 0))
+      return hk_nir_lb_val_const(0);
+   if (a.node < 0 && d.node < 0) {
+      uint64_t prod = 0;
+      if (__builtin_mul_overflow(a.c, d.c, &prod) || prod > UINT32_MAX) {
+         b->failed = true;
+         return hk_nir_lb_val_const(0);
+      }
+      return hk_nir_lb_val_const(prod);
+   }
+   if (a.node < 0 && a.c == 1)
+      return d;
+   if (d.node < 0 && d.c == 1)
+      return a;
+   if (a.node < 0 && a.c <= UINT32_MAX) {
+      uint64_t prod_c = 0;
+      if (!__builtin_mul_overflow(a.c, d.c, &prod_c) && prod_c <= UINT32_MAX) {
+         return (struct hk_nir_lb_val){
+            .node = hk_nir_lb_mul(b, hk_nir_lb_const(b, (uint32_t)a.c), d.node),
+            .c = prod_c,
+         };
+      }
+   }
+   if (d.node < 0 && d.c <= UINT32_MAX) {
+      uint64_t prod_c = 0;
+      if (!__builtin_mul_overflow(d.c, a.c, &prod_c) && prod_c <= UINT32_MAX) {
+         return (struct hk_nir_lb_val){
+            .node = hk_nir_lb_mul(b, hk_nir_lb_const(b, (uint32_t)d.c), a.node),
+            .c = prod_c,
+         };
+      }
+   }
+   const int la = hk_nir_lb_val_materialize(b, a);
+   const int ld = hk_nir_lb_val_materialize(b, d);
+   return (struct hk_nir_lb_val){
+      .node = hk_nir_lb_mul(b, la, ld),
+      .c = 0,
+   };
 }
 
 static inline bool
@@ -190,35 +331,35 @@ hk_nir_lb_is_simple_break_if(nir_if *nif)
    return exec_list_is_empty(&nir_cf_node_as_block(en)->instr_list);
 }
 
-static inline int
+static inline struct hk_nir_lb_val
 hk_nir_lb_loop_trips(struct hk_nir_lb_builder *b, nir_loop *loop)
 {
    nir_cf_node *prev_cf = nir_cf_node_prev(&loop->cf_node);
    if (!prev_cf || prev_cf->type != nir_cf_node_block) {
       b->failed = true;
-      return -1;
+      return hk_nir_lb_val_const(0);
    }
    nir_block *pre = nir_cf_node_as_block(prev_cf);
    if (exec_list_is_empty(&loop->body)) {
       b->failed = true;
-      return -1;
+      return hk_nir_lb_val_const(0);
    }
    nir_cf_node *first_cf =
       exec_node_data(nir_cf_node, exec_list_get_head(&loop->body), node);
    if (first_cf->type != nir_cf_node_block) {
       b->failed = true;
-      return -1;
+      return hk_nir_lb_val_const(0);
    }
    nir_block *hdr = nir_cf_node_as_block(first_cf);
    nir_cf_node *second_cf = nir_cf_node_next(first_cf);
    if (!second_cf || second_cf->type != nir_cf_node_if) {
       b->failed = true;
-      return -1;
+      return hk_nir_lb_val_const(0);
    }
    nir_if *brk_if = nir_cf_node_as_if(second_cf);
    if (!hk_nir_lb_is_simple_break_if(brk_if)) {
       b->failed = true;
-      return -1;
+      return hk_nir_lb_val_const(0);
    }
 
    /* If the break condition is a disjunction (A || B), breaking occurs at least
@@ -315,47 +456,52 @@ hk_nir_lb_loop_trips(struct hk_nir_lb_builder *b, nir_loop *loop)
 
    if (!found_canonical) {
       b->failed = true;
-      return -1;
+      return hk_nir_lb_val_const(0);
    }
 
    /* Check explicit dynamic parameter binding first (structure already verified). */
    for (unsigned i = 0; i < b->num_bindings; ++i) {
-      if (b->bindings[i].loop == loop)
-         return hk_nir_lb_param(b, b->bindings[i].param);
+      if (b->bindings[i].loop == loop) {
+         return (struct hk_nir_lb_val){
+            .node = hk_nir_lb_param(b, b->bindings[i].param),
+            .c = 0,
+         };
+      }
    }
 
    if (!found_const) {
       b->failed = true;
-      return -1;
+      return hk_nir_lb_val_const(0);
    }
-   return hk_nir_lb_const(b, (uint32_t)best_const_trips);
+   return hk_nir_lb_val_const(best_const_trips);
 }
 
-static inline int
+static inline struct hk_nir_lb_val
 hk_nir_lb_walk_list(struct hk_nir_lb_builder *b, const struct exec_list *cf_list)
 {
-   int total = hk_nir_lb_const(b, 0);
+   struct hk_nir_lb_val total = hk_nir_lb_val_const(0);
    foreach_list_typed(nir_cf_node, cf, node, cf_list) {
       if (b->failed)
-         return -1;
+         return hk_nir_lb_val_const(0);
       if (cf->type == nir_cf_node_block) {
          continue;
       } else if (cf->type == nir_cf_node_if) {
          nir_if *nif = nir_cf_node_as_if(cf);
-         const int t = hk_nir_lb_walk_list(b, &nif->then_list);
-         const int e = hk_nir_lb_walk_list(b, &nif->else_list);
-         total = hk_nir_lb_add(b, total, hk_nir_lb_max(b, t, e));
+         const struct hk_nir_lb_val t = hk_nir_lb_walk_list(b, &nif->then_list);
+         const struct hk_nir_lb_val e = hk_nir_lb_walk_list(b, &nif->else_list);
+         total = hk_nir_lb_val_add(b, total, hk_nir_lb_val_max(b, t, e));
       } else if (cf->type == nir_cf_node_loop) {
          nir_loop *loop = nir_cf_node_as_loop(cf);
-         const int trips = hk_nir_lb_loop_trips(b, loop);
-         const int body = hk_nir_lb_walk_list(b, &loop->body);
-         const int one = hk_nir_lb_const(b, 1);
-         const int per_iter = hk_nir_lb_add(b, one, body);
-         const int loop_edges = hk_nir_lb_mul(b, trips, per_iter);
-         total = hk_nir_lb_add(b, total, loop_edges);
+         const struct hk_nir_lb_val trips = hk_nir_lb_loop_trips(b, loop);
+         const struct hk_nir_lb_val body = hk_nir_lb_walk_list(b, &loop->body);
+         const struct hk_nir_lb_val per_iter =
+            hk_nir_lb_val_add(b, hk_nir_lb_val_const(1), body);
+         const struct hk_nir_lb_val loop_edges =
+            hk_nir_lb_val_mul(b, trips, per_iter);
+         total = hk_nir_lb_val_add(b, total, loop_edges);
       } else {
          b->failed = true;
-         return -1;
+         return hk_nir_lb_val_const(0);
       }
    }
    return total;
@@ -388,36 +534,36 @@ hk_nir_lb_block_weight(const nir_block *blk)
    return w;
 }
 
-static inline int
+static inline struct hk_nir_lb_val
 hk_nir_lb_walk_work_list(struct hk_nir_lb_builder *b,
                          const struct exec_list *cf_list)
 {
-   int total = hk_nir_lb_const(b, 0);
+   struct hk_nir_lb_val total = hk_nir_lb_val_const(0);
    foreach_list_typed(nir_cf_node, cf, node, cf_list) {
       if (b->failed)
-         return -1;
+         return hk_nir_lb_val_const(0);
       if (cf->type == nir_cf_node_block) {
          const uint32_t w = hk_nir_lb_block_weight(nir_cf_node_as_block(cf));
          if (w > 0)
-            total = hk_nir_lb_add(b, total, hk_nir_lb_const(b, w));
+            total = hk_nir_lb_val_add(b, total, hk_nir_lb_val_const(w));
       } else if (cf->type == nir_cf_node_if) {
          nir_if *nif = nir_cf_node_as_if(cf);
-         const int t = hk_nir_lb_walk_work_list(b, &nif->then_list);
-         const int e = hk_nir_lb_walk_work_list(b, &nif->else_list);
-         total = hk_nir_lb_add(b, total, hk_nir_lb_max(b, t, e));
+         const struct hk_nir_lb_val t = hk_nir_lb_walk_work_list(b, &nif->then_list);
+         const struct hk_nir_lb_val e = hk_nir_lb_walk_work_list(b, &nif->else_list);
+         total = hk_nir_lb_val_add(b, total, hk_nir_lb_val_max(b, t, e));
       } else if (cf->type == nir_cf_node_loop) {
          nir_loop *loop = nir_cf_node_as_loop(cf);
-         const int trips = hk_nir_lb_loop_trips(b, loop);
-         const int body = hk_nir_lb_walk_work_list(b, &loop->body);
+         const struct hk_nir_lb_val trips = hk_nir_lb_loop_trips(b, loop);
+         const struct hk_nir_lb_val body = hk_nir_lb_walk_work_list(b, &loop->body);
          const nir_block *hdr = nir_loop_first_block(loop);
          const uint32_t hdr_w = hk_nir_lb_block_weight(hdr) + 1u;
-         const int loop_work =
-            hk_nir_lb_add(b, hk_nir_lb_mul(b, trips, body),
-                          hk_nir_lb_const(b, hdr_w));
-         total = hk_nir_lb_add(b, total, loop_work);
+         const struct hk_nir_lb_val loop_work =
+            hk_nir_lb_val_add(b, hk_nir_lb_val_mul(b, trips, body),
+                              hk_nir_lb_val_const(hdr_w));
+         total = hk_nir_lb_val_add(b, total, loop_work);
       } else {
          b->failed = true;
-         return -1;
+         return hk_nir_lb_val_const(0);
       }
    }
    return total;
@@ -453,9 +599,10 @@ hk_nir_compute_pack_loop_bound(nir_shader *nir,
       .failed = false,
    };
 
-   const int edges = hk_nir_lb_walk_list(&b, &impl->body);
-   const int one = hk_nir_lb_const(&b, 1);
-   const int bound = hk_nir_lb_add(&b, edges, one);
+   const struct hk_nir_lb_val edges = hk_nir_lb_walk_list(&b, &impl->body);
+   const struct hk_nir_lb_val bound_v =
+      hk_nir_lb_val_add(&b, edges, hk_nir_lb_val_const(1));
+   const int bound = hk_nir_lb_val_materialize(&b, bound_v);
    if (b.failed || bound < 0 || out->count == 0) {
       memset(out, 0, sizeof(*out));
       return false;
@@ -486,7 +633,9 @@ hk_nir_compute_pack_loop_bound(nir_shader *nir,
          .num_bindings = num_bindings,
          .failed = false,
       };
-      const int work = hk_nir_lb_walk_work_list(&wb, &impl->body);
+      const struct hk_nir_lb_val work_v =
+         hk_nir_lb_walk_work_list(&wb, &impl->body);
+      const int work = hk_nir_lb_val_materialize(&wb, work_v);
       if (!wb.failed && work >= 0 && out->work_count > 0) {
          bool ok = true;
          if (work != (int)out->work_count - 1) {
