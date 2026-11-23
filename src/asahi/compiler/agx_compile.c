@@ -10585,6 +10585,15 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
       }
    }
 
+   /* Eliminate tautological monotonic bit-insert guards inside <=32-trip loops
+    * so affected loops become straight-line before vectorization and unrolling. */
+   {
+      bool folded_bits = false;
+      NIR_PASS(folded_bits, nir, agx_nir_opt_monotonic_bit_insert);
+      if (folded_bits)
+         agx_optimize_loop_nir(nir, m5, g17p);
+   }
+
    /* Only AGX3 compute shaders defer element-index lowering here; AGX2 never
     * sets shared_element_index_agx and must keep its existing scalar shared
     * lowering. Frontends that ran agx_preprocess_nir() with g17p == false
