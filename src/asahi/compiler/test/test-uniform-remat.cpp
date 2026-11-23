@@ -19,7 +19,7 @@ TEST(UniformRemat, ImmutableWordCopiesOnly)
                uniform.value = value;
                agx_instr *I = agx_mov_to(b, agx_temp(b->shader, size), uniform);
                EXPECT_EQ(agx_can_rematerialize_uniform(b->shader, I),
-                         encoding == AGX_ISA_ENCODING_AGX3B && !preamble &&
+                         agx_isa_is_agx3(encoding) && !preamble &&
                             size == AGX_SIZE_32 && value < 512 && !(value & 1));
             }
          }
@@ -39,33 +39,36 @@ TEST(UniformRemat, ImmutableWordCopiesOnly)
 
 TEST(UniformRemat, SpillerRecreatesUniformsWithoutMemoryTraffic)
 {
-   void *mem = ralloc_context(NULL);
-   agx_builder *b = agx_test_builder(mem);
-   agx_shader_key key = {};
-   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
-   key.dev.chip = AGX_CHIP_G17P;
-   key.has_scratch = true;
-   b->shader->key = &key;
-   b->shader->stage = MESA_SHADER_FRAGMENT;
-   agx_index values[16];
-   for (unsigned i = 0; i < 16; ++i)
-      values[i] = agx_mov(b, agx_uniform(2 * i, AGX_SIZE_32));
-   for (agx_index value : values)
-      agx_unit_test(b, value);
-   agx_compute_liveness(b->shader);
-   agx_spill(b->shader, 24, false);
-   unsigned copies = 0;
-   agx_foreach_instr_global(b->shader, I) {
-      EXPECT_NE(I->op, AGX_OPCODE_STACK_LOAD);
-      EXPECT_NE(I->op, AGX_OPCODE_STACK_STORE);
-      agx_foreach_src(I, s)
-         EXPECT_FALSE(I->src[s].memory);
-      agx_foreach_dest(I, d)
-         EXPECT_FALSE(I->dest[d].memory);
-      copies += I->op == AGX_OPCODE_MOV && I->src[0].type == AGX_INDEX_UNIFORM;
+   for (auto encoding : {AGX_ISA_ENCODING_AGX3B, AGX_ISA_ENCODING_AGX3C}) {
+      void *mem = ralloc_context(NULL);
+      agx_builder *b = agx_test_builder(mem);
+      agx_shader_key key = {};
+      key.dev.encoding = encoding;
+      key.dev.chip =
+         encoding == AGX_ISA_ENCODING_AGX3B ? AGX_CHIP_G17P : AGX_CHIP_G17S;
+      key.has_scratch = true;
+      b->shader->key = &key;
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_index values[16];
+      for (unsigned i = 0; i < 16; ++i)
+         values[i] = agx_mov(b, agx_uniform(2 * i, AGX_SIZE_32));
+      for (agx_index value : values)
+         agx_unit_test(b, value);
+      agx_compute_liveness(b->shader);
+      agx_spill(b->shader, 24, false);
+      unsigned copies = 0;
+      agx_foreach_instr_global(b->shader, I) {
+         EXPECT_NE(I->op, AGX_OPCODE_STACK_LOAD);
+         EXPECT_NE(I->op, AGX_OPCODE_STACK_STORE);
+         agx_foreach_src(I, s)
+            EXPECT_FALSE(I->src[s].memory);
+         agx_foreach_dest(I, d)
+            EXPECT_FALSE(I->dest[d].memory);
+         copies += I->op == AGX_OPCODE_MOV && I->src[0].type == AGX_INDEX_UNIFORM;
+      }
+      EXPECT_GE(copies, 16u);
+      ralloc_free(mem);
    }
-   EXPECT_GE(copies, 16u);
-   ralloc_free(mem);
 }
 
 TEST(UniformRemat, UniformWritesKeepCapturedValuesInMemory)
