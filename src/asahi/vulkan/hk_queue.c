@@ -2656,14 +2656,14 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
 DEBUG_GET_ONCE_OPTION(hk_pack_cdm_submit_opt, "HK_PACK_CDM_SUBMIT", NULL)
 DEBUG_GET_ONCE_OPTION(m5_pack_cdm_submit_opt, "ASAHI_M5_PACK_CDM_SUBMIT", NULL)
 
+DEBUG_GET_ONCE_BOOL_OPTION(hk_pack_cdm_trace, "HK_PACK_CDM_TRACE", false)
+DEBUG_GET_ONCE_BOOL_OPTION(m5_pack_cdm_trace, "ASAHI_M5_PACK_CDM_TRACE", false)
+
 static bool
 hk_pack_trace(void)
 {
-   static int trace = -1;
-   if (trace < 0)
-      trace = debug_get_bool_option("HK_PACK_CDM_TRACE", false) ||
-              debug_get_bool_option("ASAHI_M5_PACK_CDM_TRACE", false);
-   return trace;
+   return debug_get_option_hk_pack_cdm_trace() ||
+          debug_get_option_m5_pack_cdm_trace();
 }
 
 static bool
