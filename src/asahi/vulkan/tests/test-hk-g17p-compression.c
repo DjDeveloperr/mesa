@@ -797,6 +797,104 @@ check_m5_msaa_color(void)
    CHECK(!hk_m5_msaa_color_compression_eligible(AGX_CHIP_G17S, 0, &c));
 }
 
+static void
+check_m5_storage(void)
+{
+   const VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT |
+      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+   VkImageCreateInfo base = image(VK_FORMAT_R16G16B16A16_SFLOAT, 1920, 1080, 1,
+                                  usage);
+
+   /* Only G17S compresses storage images; G17P stays plain. */
+   CHECK(hk_m5_storage_compression_bit(AGX_CHIP_G17S, 0, &base, false, true) == 1u);
+   CHECK(!hk_m5_storage_compression_bit(AGX_CHIP_G17P, 0, &base, false, true));
+   CHECK(!hk_m5_storage_compression_bit(AGX_CHIP_G17S, 1, &base, false, true));
+   CHECK(!hk_m5_storage_compression_bit(AGX_CHIP_G17S, 0, NULL, false, true));
+
+   /* Benign pNext structs (including ExternalMemory handleTypes == 0, as used
+    * by host-image-copy queries) must keep compression enabled; non-zero
+    * external handleTypes and WSI must refuse it. */
+   VkExternalMemoryImageCreateInfo ext_zero = {
+      .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+      .handleTypes = 0,
+   };
+   VkImageCreateInfo c = base;
+   c.pNext = &ext_zero;
+   CHECK(hk_m5_storage_compression_bit(AGX_CHIP_G17S, 0, &c, false, true) == 1u);
+
+   VkExternalMemoryImageCreateInfo ext_fd = {
+      .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+      .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+   };
+   c.pNext = &ext_fd;
+   CHECK(!hk_m5_storage_compression_bit(AGX_CHIP_G17S, 0, &c, false, true));
+
+   VkBaseInStructure wsi = { .sType = HK_G17P_WSI_IMAGE_CREATE_INFO_MESA };
+   c.pNext = &wsi;
+   CHECK(!hk_m5_storage_compression_bit(AGX_CHIP_G17S, 0, &c, false, true));
+
+   /* Chained pNext with ExternalMemory(0) + ImageFormatList + MUTABLE_FORMAT */
+   const VkFormat rgba16_views[] = {
+      VK_FORMAT_R16G16B16A16_SFLOAT,
+      VK_FORMAT_R16G16B16A16_UINT,
+   };
+   VkImageFormatListCreateInfo list = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
+      .viewFormatCount = 2,
+      .pViewFormats = rgba16_views,
+   };
+   ext_zero.pNext = &list;
+   c = base;
+   c.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT |
+             VK_IMAGE_CREATE_EXTENDED_USAGE_BIT |
+             VK_IMAGE_CREATE_ALIAS_BIT;
+   c.pNext = &ext_zero;
+   CHECK(hk_m5_storage_compression_bit(AGX_CHIP_G17S, 0, &c, false, true) == 1u);
+
+   /* Format list without MUTABLE_FORMAT_BIT is ignored by Vulkan. */
+   c = base;
+   c.pNext = &list;
+   CHECK(hk_m5_storage_compression_bit(AGX_CHIP_G17S, 0, &c, false, true) == 1u);
+
+   /* MUTABLE_FORMAT_BIT without format list stays plain. */
+   c = base;
+   c.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+   CHECK(!hk_m5_storage_compression_bit(AGX_CHIP_G17S, 0, &c, false, true));
+
+   /* R32_SFLOAT: mutable with R32_SFLOAT-only list is safe when no float
+    * image atomics; listing R32_UINT or enabling float atomics refuses it. */
+   const VkFormat r32f_only[] = { VK_FORMAT_R32_SFLOAT, VK_FORMAT_UNDEFINED };
+   const VkFormat r32_with_uint[] = { VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32_UINT };
+   VkImageFormatListCreateInfo r32_list = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
+      .viewFormatCount = 2,
+      .pViewFormats = r32f_only,
+   };
+   c = image(VK_FORMAT_R32_SFLOAT, 1920, 1080, 1, usage);
+   c.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+   c.pNext = &r32_list;
+   CHECK(hk_m5_storage_compression_bit(AGX_CHIP_G17S, 0, &c, false, true) == 8u);
+   CHECK(!hk_m5_storage_compression_bit(AGX_CHIP_G17S, 0, &c, true, true));
+   r32_list.pViewFormats = r32_with_uint;
+   CHECK(!hk_m5_storage_compression_bit(AGX_CHIP_G17S, 0, &c, false, true));
+
+   /* Disjoint, sparse, 2D_ARRAY, 3D, and MSAA stay plain. */
+   c = base; c.flags = VK_IMAGE_CREATE_DISJOINT_BIT;
+   CHECK(!hk_m5_storage_compression_bit(AGX_CHIP_G17S, 0, &c, false, true));
+   c = base; c.flags = VK_IMAGE_CREATE_SPARSE_BINDING_BIT;
+   CHECK(!hk_m5_storage_compression_bit(AGX_CHIP_G17S, 0, &c, false, true));
+   c = base; c.arrayLayers = 2;
+   CHECK(!hk_m5_storage_compression_bit(AGX_CHIP_G17S, 0, &c, false, true));
+   c = base; c.imageType = VK_IMAGE_TYPE_3D;
+   CHECK(!hk_m5_storage_compression_bit(AGX_CHIP_G17S, 0, &c, false, true));
+   c = base; c.samples = VK_SAMPLE_COUNT_4_BIT;
+   CHECK(!hk_m5_storage_compression_bit(AGX_CHIP_G17S, 0, &c, false, true));
+   c = base; c.mipLevels = 4;
+   CHECK(hk_m5_storage_compression_bit(AGX_CHIP_G17S, 0, &c, false, true) == 1u);
+   CHECK(!hk_m5_storage_compression_bit(AGX_CHIP_G17S, 0, &c, false, false));
+}
+
 int
 main(void)
 {
@@ -821,6 +919,7 @@ main(void)
    check_m5_color();
    check_m5_msaa_color();
    check_m5_depth_msaa();
+   check_m5_storage();
    printf("G17P compression policy: %u checks passed\n", checks);
    return 0;
 }

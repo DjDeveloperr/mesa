@@ -720,3 +720,113 @@ hk_m5_depth_msaa_transfer_eligible(enum agx_chip chip, unsigned plane,
    return hk_m5_depth_msaa_compression_eligible(chip, plane, &base,
                                                 kernel_features);
 }
+
+/* M5 lossless storage compression policy (G17S only; G17P PBE does not merge
+ * scattered shader stores into compressed blocks). Returns the format bitmask
+ * (bits 0-11) when the image is eligible, or 0 otherwise.
+ *
+ * Walks pNext identically to hk_m5_color_compression_eligible() so benign
+ * structures (e.g. VkExternalMemoryImageCreateInfo with handleTypes == 0 from
+ * host-image-copy queries, or VkImageFormatListCreateInfo chained with other
+ * structures / without MUTABLE_FORMAT_BIT) do not inhibit compression.
+ * Admits VK_IMAGE_CREATE_ALIAS_BIT under the same contract as M5 color/depth
+ * compression (identical creation parameters map to identical layouts, and
+ * cross-image heap reuse requires an UNDEFINED transition which initializes
+ * storage metadata via brl_barrier_needs_metadata_init()).
+ */
+static inline unsigned
+hk_m5_storage_compression_bit(enum agx_chip chip, unsigned plane,
+                              const VkImageCreateInfo *info,
+                              bool float_image_atomics, bool allow_mipmaps)
+{
+   if (chip != AGX_CHIP_G17S || plane != 0 || !info)
+      return 0;
+
+   const VkImageCreateFlags allowed_flags =
+      VK_IMAGE_CREATE_ALIAS_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT |
+      VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+   if ((info->flags & ~allowed_flags) ||
+       info->imageType != VK_IMAGE_TYPE_2D || info->extent.depth != 1 ||
+       info->extent.width < 16 || info->extent.height < 16 ||
+       (info->mipLevels != 1 && !allow_mipmaps) ||
+       info->arrayLayers != 1 ||
+       info->samples != VK_SAMPLE_COUNT_1_BIT ||
+       info->tiling != VK_IMAGE_TILING_OPTIMAL ||
+       !(info->usage & VK_IMAGE_USAGE_STORAGE_BIT) ||
+       (info->usage & ~(VK_IMAGE_USAGE_STORAGE_BIT |
+                        VK_IMAGE_USAGE_SAMPLED_BIT |
+                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                        VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                        VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)))
+      return 0;
+
+   bool has_format_list = false;
+   VkImageFormatListCreateInfo format_list = {0};
+   for (const void *next = info->pNext; next;) {
+      VkStructureType type;
+      const void *following;
+      memcpy(&type, next, sizeof(type));
+      memcpy(&following, (const char *)next + offsetof(VkBaseInStructure, pNext),
+             sizeof(following));
+      if (type == VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO) {
+         VkExternalMemoryImageCreateInfo external;
+         memcpy(&external, next, sizeof(external));
+         if (external.handleTypes)
+            return 0;
+      }
+      if (type == HK_G17P_WSI_IMAGE_CREATE_INFO_MESA)
+         return 0;
+      if (type == VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO) {
+         memcpy(&format_list, next, sizeof(format_list));
+         has_format_list = true;
+      }
+      next = following;
+   }
+
+   const bool mutable_fmt =
+      (info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) != 0;
+   if (mutable_fmt && (!has_format_list || !format_list.viewFormatCount ||
+                       !format_list.pViewFormats))
+      return 0;
+
+   switch (info->format) {
+   case VK_FORMAT_R16G16B16A16_SFLOAT: return 1u;
+   case VK_FORMAT_R16G16_SFLOAT: return 2u;
+   case VK_FORMAT_R16_SFLOAT: return 4u;
+   case VK_FORMAT_R32_SFLOAT:
+      /* A mutable R32F image may list R32_UINT or R32_SINT views (the R32
+       * channel layout of hk_can_compress()), which have image atomics. Allow
+       * mutable R32F only when the format list restricts views to R32_SFLOAT. */
+      if (float_image_atomics)
+         return 0;
+      if (mutable_fmt) {
+         for (uint32_t i = 0; i < format_list.viewFormatCount; ++i) {
+            if (format_list.pViewFormats[i] != VK_FORMAT_R32_SFLOAT &&
+                format_list.pViewFormats[i] != VK_FORMAT_UNDEFINED)
+               return 0;
+         }
+      }
+      return 8u;
+   case VK_FORMAT_R32G32_SFLOAT: return 16u;
+   case VK_FORMAT_R32G32B32A32_SFLOAT: return 32u;
+   case VK_FORMAT_R8G8B8A8_UNORM: return 64u;
+   case VK_FORMAT_R16G16B16A16_UNORM:
+   case VK_FORMAT_R16G16B16A16_SNORM:
+   case VK_FORMAT_R16G16B16A16_UINT:
+   case VK_FORMAT_R16G16B16A16_SINT: return 128u;
+   case VK_FORMAT_R16G16_UNORM:
+   case VK_FORMAT_R16G16_SNORM:
+   case VK_FORMAT_R16G16_UINT:
+   case VK_FORMAT_R16G16_SINT: return 256u;
+   case VK_FORMAT_R8G8B8A8_SNORM:
+   case VK_FORMAT_R8G8B8A8_UINT:
+   case VK_FORMAT_R8G8B8A8_SINT: return 512u;
+   case VK_FORMAT_R16_UNORM:
+   case VK_FORMAT_R16_SNORM:
+   case VK_FORMAT_R16_UINT:
+   case VK_FORMAT_R16_SINT: return 1024u;
+   case VK_FORMAT_B10G11R11_UFLOAT_PACK32: return 2048u;
+   default: return 0;
+   }
+}

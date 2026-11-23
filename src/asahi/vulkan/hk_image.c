@@ -544,19 +544,6 @@ hk_m5_storage_compression_eligible(const struct agx_device *dev, unsigned plane,
                                  const VkImageCreateInfo *info,
                                  bool float_image_atomics)
 {
-   /* Typeless resources of D3D translation layers are mutable and list
-    * their view formats: the formats of one channel layout (UNORM, SNORM,
-    * UINT, SINT, FLOAT). None of these formats has image atomics, so such an
-    * image compresses when hk_can_compress() finds only formats of the
-    * image's channel layout in the list. */
-   const VkImageCreateFlags allowed_flags =
-      VK_IMAGE_CREATE_EXTENDED_USAGE_BIT | VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
-   const VkBaseInStructure *ext = info->pNext;
-   const bool format_list_only =
-      (info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) && ext &&
-      ext->sType == VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO &&
-      !ext->pNext;
-
    /* G17P storage images stay uncompressed: a shader image store through
     * the G17P PBE does not merge into a compressed block or update its
     * metadata. It writes the block as the block's existing metadata says,
@@ -577,64 +564,10 @@ hk_m5_storage_compression_eligible(const struct agx_device *dev, unsigned plane,
    if (dev->chip == AGX_CHIP_G17P)
       return false;
 
-   if (dev->chip != AGX_CHIP_G17S || plane ||
-       (info->pNext && !format_list_only) ||
-       (info->flags & ~allowed_flags) ||
-       info->imageType != VK_IMAGE_TYPE_2D || info->extent.depth != 1 ||
-       info->extent.width < 16 || info->extent.height < 16 ||
-       (info->mipLevels != 1 &&
-        !(debug_get_option_m5_storage_compression() & 4096)) ||
-       info->arrayLayers != 1 ||
-       info->samples != VK_SAMPLE_COUNT_1_BIT ||
-       info->tiling != VK_IMAGE_TILING_OPTIMAL ||
-       !(info->usage & VK_IMAGE_USAGE_STORAGE_BIT) ||
-       (info->usage & ~(VK_IMAGE_USAGE_STORAGE_BIT |
-                        VK_IMAGE_USAGE_SAMPLED_BIT |
-                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                        VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                        VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)))
-      return false;
-
-   unsigned bit;
-   switch (info->format) {
-   case VK_FORMAT_R16G16B16A16_SFLOAT: bit = 1; break;
-   case VK_FORMAT_R16G16_SFLOAT: bit = 2; break;
-   case VK_FORMAT_R16_SFLOAT: bit = 4; break;
-   case VK_FORMAT_R32_SFLOAT:
-      /* A mutable R32F image may list R32_UINT or R32_SINT views (the R32
-       * channel layout of hk_can_compress()), which have image atomics. */
-      if (float_image_atomics ||
-          (info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT))
-         return false;
-      bit = 8;
-      break;
-   case VK_FORMAT_R32G32_SFLOAT: bit = 16; break;
-   case VK_FORMAT_R32G32B32A32_SFLOAT: bit = 32; break;
-   case VK_FORMAT_R8G8B8A8_UNORM: bit = 64; break;
-   case VK_FORMAT_R16G16B16A16_UNORM:
-   case VK_FORMAT_R16G16B16A16_SNORM:
-   case VK_FORMAT_R16G16B16A16_UINT:
-   case VK_FORMAT_R16G16B16A16_SINT: bit = 128; break;
-   case VK_FORMAT_R16G16_UNORM:
-   case VK_FORMAT_R16G16_SNORM:
-   case VK_FORMAT_R16G16_UINT:
-   case VK_FORMAT_R16G16_SINT: bit = 256; break;
-   case VK_FORMAT_R8G8B8A8_SNORM:
-   case VK_FORMAT_R8G8B8A8_UINT:
-   case VK_FORMAT_R8G8B8A8_SINT: bit = 512; break;
-   case VK_FORMAT_R16_UNORM:
-   case VK_FORMAT_R16_SNORM:
-   case VK_FORMAT_R16_UINT:
-   case VK_FORMAT_R16_SINT: bit = 1024; break;
-   case VK_FORMAT_B10G11R11_UFLOAT_PACK32: bit = 2048; break;
-   default: return false;
-   }
-   /* A mutable image's views may be FLOAT when the image is not: the list
-    * check in hk_can_compress() keeps them to the image's channel layout. */
-   if ((info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) && !format_list_only)
-      return false;
-   return debug_get_option_m5_storage_compression() & bit;
+   const uint64_t opt = (uint64_t)debug_get_option_m5_storage_compression();
+   const unsigned bit = hk_m5_storage_compression_bit(
+      dev->chip, plane, info, float_image_atomics, (opt & 4096u) != 0);
+   return (opt & (uint64_t)bit) != 0;
 }
 
 static bool
