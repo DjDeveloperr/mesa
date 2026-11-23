@@ -294,9 +294,9 @@ hk_get_device_extensions(const struct agx_device *dev,
       /* Tested on G17P only. */
       .EXT_depth_clip_control = dev->chip == AGX_CHIP_G17P,
       .EXT_depth_clip_enable = true,
-      /* Qualified on G17P only (the whole binding_model.descriptor_buffer
-       * group); other chips share the code but need their own run. */
-      .EXT_descriptor_buffer = dev->chip == AGX_CHIP_G17P,
+      /* Enabled on G17P and M5; other chips share the code but need their own
+       * qualification run. */
+      .EXT_descriptor_buffer = agx_chip_g17p_or_m5(dev->chip),
       .EXT_descriptor_indexing = true,
 #ifdef VK_USE_PLATFORM_DISPLAY_KHR
       .EXT_display_control = false,
