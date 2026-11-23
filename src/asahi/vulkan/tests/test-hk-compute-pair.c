@@ -15,6 +15,7 @@
 #include "compiler/nir/nir_builder.h"
 #include "hk_nir_eval_test.h"
 #include "hk_nir_match_pointwise_clamp.h"
+#include "hk_nir_loop_bound.h"
 
 static nir_shader *
 new_compute_shader(const char *name, uint16_t lx, uint16_t ly, uint16_t lz)
@@ -1999,6 +2000,170 @@ test_dual_write_fusion(void)
    ralloc_free(orig);
 }
 
+static void
+test_nir_derived_pack_loop_bounds(void)
+{
+   /* 1. Depthwise vec4: verify NIR-derived bound == kh*kw + kh + 1 and
+    *    dominates actual per-thread dynamic back-edges + 1. */
+   {
+      const struct dw_push_layout cfg = {
+         .in_w = 7, .in_h = 6, .out_w = 7, .out_h = 6,
+         .ker_w = 3, .ker_h = 3, .str_x = 1, .str_y = 1,
+         .dil_x = 1, .dil_y = 1, .pad_x = -1, .pad_y = -1,
+         .channels = 8, .has_bias = 1,
+      };
+      nir_shader *orig = build_depthwise_nir(true, true, 0, 0, 1, 2, 3);
+      nir_shader *pre = nir_shader_clone(NULL, orig);
+      run_hk_preprocess_for_test(pre, false);
+      struct hk_nir_depthwise_output m = {0};
+      HK_EVAL_CHECK(hk_nir_match_depthwise_output(
+         pre, nir_address_format_64bit_global_32bit_offset, &m));
+
+      struct hk_pack_loop_bound lb = {0};
+      nir_shader *dw4 = hk_nir_build_depthwise_vec4_with_bound(
+         pre, &m, NULL, HK_COMPUTE_PAIR_DUAL_NONE, &lb);
+      HK_EVAL_CHECK(dw4 != NULL && lb.valid);
+
+      uint64_t params[HK_PACK_LOOP_PARAM_COUNT] = {0};
+      params[HK_PACK_LOOP_PARAM_DW_KH] = 3;
+      params[HK_PACK_LOOP_PARAM_DW_KW] = 3;
+      uint64_t bound = 0;
+      HK_EVAL_CHECK(hk_pack_eval_loop_bound(&lb, params, &bound));
+      /* ky (3) * (1 + kx (3)) + 1 = 13 back-edges + 1 */
+      HK_EVAL_CHECK(bound == 3ull * 3ull + 3ull + 1ull);
+
+      const size_t in_n = (size_t)cfg.in_h * cfg.in_w * cfg.channels;
+      const size_t wt_n = (size_t)cfg.ker_h * cfg.ker_w * cfg.channels;
+      const size_t out_n = (size_t)cfg.out_h * cfg.out_w * cfg.channels;
+      float *in_b = calloc(in_n, sizeof(float));
+      float *wt_b = calloc(wt_n, sizeof(float));
+      float *bi_b = calloc(cfg.channels, sizeof(float));
+      float *out_b = calloc(out_n, sizeof(float));
+      struct hk_eval_ssbo ssbos[4] = {
+         { 0, 0, in_b, in_n * 4, 0 },
+         { 0, 1, wt_b, wt_n * 4, 0 },
+         { 0, 2, bi_b, cfg.channels * 4, 0 },
+         { 0, 3, out_b, out_n * 4, 0 },
+      };
+      const uint32_t g[3] = {
+         DIV_ROUND_UP(cfg.channels / 4, dw4->info.workgroup_size[0]),
+         DIV_ROUND_UP((cfg.out_w + 1) / 2, dw4->info.workgroup_size[1]),
+         DIV_ROUND_UP(cfg.out_h, dw4->info.workgroup_size[2]),
+      };
+      hk_eval_dispatch(dw4, g, ssbos, 4, &cfg, sizeof(cfg));
+      HK_EVAL_CHECK(bound >= hk_eval_last_max_loop_backedges + 1);
+      free(in_b); free(wt_b); free(bi_b); free(out_b);
+      ralloc_free(dw4); ralloc_free(pre); ralloc_free(orig);
+   }
+
+   /* 2. GEMM cmat (guarded, DUAL_PAD4 simple & adversarial):
+    *    verify NIR-derived bound >= actual max per-thread dynamic back-edges + 1. */
+   {
+      const struct gemm_test_opts o_g = {
+         .guarded = true, .has_bias_buf = true, .has_bias_mode = true, .use_ffma = true,
+      };
+      nir_shader *orig = build_tiled_gemm_nir_opts(&o_g);
+      nir_shader *pre = nir_shader_clone(NULL, orig);
+      run_hk_preprocess_for_test(pre, false);
+      struct hk_nir_gemm_output m = {0};
+      HK_EVAL_CHECK(hk_nir_match_gemm_output(
+         pre, nir_address_format_64bit_global_32bit_offset, &m));
+
+      const uint32_t M = 35, N = 32, K = 19, tile_n = 32;
+      const uint32_t k_step = 16;
+      struct hk_pack_loop_bound lb_g = {0};
+      nir_shader *cmat_g = hk_nir_build_gemm_cmat_with_bound(
+         pre, &m, tile_n, NULL, HK_COMPUTE_PAIR_DUAL_NONE, &lb_g);
+      HK_EVAL_CHECK(cmat_g != NULL && lb_g.valid);
+
+      uint64_t params[HK_PACK_LOOP_PARAM_COUNT] = {0};
+      params[HK_PACK_LOOP_PARAM_GEMM_K_ITERS] = DIV_ROUND_UP(K, k_step);
+      uint64_t bound_g = 0;
+      HK_EVAL_CHECK(hk_pack_eval_loop_bound(&lb_g, params, &bound_g));
+
+      float *a = calloc((size_t)M * K, 4);
+      float *b = calloc((size_t)K * N, 4);
+      float *bi = calloc(N, 4);
+      float *c = calloc((size_t)M * N, 4);
+      struct gemm_push_layout push = { .k = K, .n = N, .m = M, .bias_mode = 1 };
+      const uint32_t tile_m = hk_gemm_cmat_tile_m(tile_n);
+      const uint32_t g[3] = { DIV_ROUND_UP(N, tile_n), DIV_ROUND_UP(M, tile_m), 1 };
+      struct hk_eval_ssbo ssbos[4] = {
+         { 0, 0, a, (size_t)M * K * 4, 0 },
+         { 0, 1, b, (size_t)K * N * 4, 0 },
+         { 0, 2, bi, (size_t)N * 4, 0 },
+         { 0, 3, c, (size_t)M * N * 4, 0 },
+      };
+      hk_eval_dispatch_wg(cmat_g, g, ssbos, 4, &push, sizeof(push));
+      HK_EVAL_CHECK(bound_g >= hk_eval_last_max_loop_backedges + 1);
+
+      /* DUAL_PAD4 (both simple_pad and adversarial !simple_pad zero-fill zlp). */
+      struct hk_pack_loop_bound lb_p = {0};
+      nir_shader *cmat_p = hk_nir_build_gemm_cmat_with_bound(
+         pre, &m, tile_n, NULL, HK_COMPUTE_PAIR_DUAL_PAD4, &lb_p);
+      HK_EVAL_CHECK(cmat_p != NULL && lb_p.valid);
+
+      const uint32_t in_h = 5, in_w = 7, out_h = 7, out_w = 9;
+      const uint32_t total_threads = g[0] * g[1] * 128u;
+      const uint64_t out_total = (uint64_t)out_h * out_w * N;
+      uint64_t p_params[HK_PACK_LOOP_PARAM_COUNT] = {0};
+      p_params[HK_PACK_LOOP_PARAM_GEMM_K_ITERS] = DIV_ROUND_UP(K, k_step);
+      p_params[HK_PACK_LOOP_PARAM_PAD_H] = out_h - in_h;
+      p_params[HK_PACK_LOOP_PARAM_PAD_W] = out_w - in_w;
+      p_params[HK_PACK_LOOP_PARAM_PAD_ZLP_ITERS] = DIV_ROUND_UP(out_total, total_threads);
+      uint64_t bound_p = 0;
+      HK_EVAL_CHECK(hk_pack_eval_loop_bound(&lb_p, p_params, &bound_p));
+      HK_EVAL_CHECK(bound_p > bound_g);
+
+      float *d = calloc(out_total, 4);
+      int32_t pad_simple[4] = { 0, 1, 1, 0 };
+      int32_t pad_adv[4] = { 1, 0, 0, 0 };
+      const uint32_t dual_off = hk_dual_write_push_offset(m.push_bytes);
+      uint8_t push_buf[128] = {0};
+      memcpy(push_buf, &push, sizeof(push));
+      const uint64_t dst2_va = hk_eval_make_vaddr(4, 0);
+      const uint64_t pad_va = hk_eval_make_vaddr(5, 0);
+      struct hk_dual_pad4_push dp = {
+         .dst2_va_lo = (uint32_t)dst2_va, .dst2_va_hi = (uint32_t)(dst2_va >> 32),
+         .pad_va_lo = (uint32_t)pad_va, .pad_va_hi = (uint32_t)(pad_va >> 32),
+         .in_h = in_h, .in_w = in_w, .out_h = out_h, .out_w = out_w,
+      };
+      memcpy(push_buf + dual_off, &dp, sizeof(dp));
+      struct hk_eval_ssbo ssbos_p[6] = {
+         { 0, 0, a, (size_t)M * K * 4, 0 },
+         { 0, 1, b, (size_t)K * N * 4, 0 },
+         { 0, 2, bi, (size_t)N * 4, 0 },
+         { 0, 3, c, (size_t)M * N * 4, 0 },
+         { 0, 9, d, out_total * 4, 0 },
+         { 0, 10, pad_simple, sizeof(pad_simple), 0 },
+      };
+      hk_eval_dispatch_wg(cmat_p, g, ssbos_p, 6, push_buf, dual_off + sizeof(dp));
+      HK_EVAL_CHECK(bound_p >= hk_eval_last_max_loop_backedges + 1);
+
+      ssbos_p[5].data = pad_adv;
+      hk_eval_dispatch_wg(cmat_p, g, ssbos_p, 6, push_buf, dual_off + sizeof(dp));
+      HK_EVAL_CHECK(bound_p >= hk_eval_last_max_loop_backedges + 1);
+
+      free(a); free(b); free(bi); free(c); free(d);
+      ralloc_free(cmat_p); ralloc_free(cmat_g); ralloc_free(pre); ralloc_free(orig);
+   }
+
+   /* 3. Negative fail-closed check: unrecognized loop MUST return valid == false. */
+   {
+      const nir_shader_compiler_options opts = {0};
+      nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, &opts, "unbounded");
+      nir_loop *lp = nir_push_loop(&b);
+      nir_if *nif = nir_push_if(&b, nir_ieq_imm(&b, nir_load_local_invocation_index(&b), 0));
+      nir_jump(&b, nir_jump_break);
+      nir_pop_if(&b, nif);
+      nir_pop_loop(&b, lp);
+      struct hk_pack_loop_bound bad = { .valid = true };
+      HK_EVAL_CHECK(!hk_nir_compute_pack_loop_bound(b.shader, NULL, 0, &bad));
+      HK_EVAL_CHECK(!bad.valid);
+      ralloc_free(b.shader);
+   }
+}
+
 int
 main(void)
 {
@@ -2010,6 +2175,7 @@ main(void)
    test_gemm_match_and_splice();
    test_gemm_cmat_certify_and_build();
    test_dual_write_fusion();
+   test_nir_derived_pack_loop_bounds();
    glsl_type_singleton_decref();
    printf("test-hk-compute-pair: PASS\n");
    return 0;

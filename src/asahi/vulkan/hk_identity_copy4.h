@@ -52,6 +52,10 @@ struct nir_shader *hk_nir_copy_identity4(const struct nir_shader *orig,
  * non-unit-stride paths) when channels, kernel_width, input_width, and
  * patches_width are multiples of 4.
  */
+struct hk_pack_loop_bound;
+struct nir_shader *hk_nir_im2col_vec4_with_bound(
+   const struct nir_shader *orig,
+   struct hk_pack_loop_bound *loop_bound_out);
 struct nir_shader *hk_nir_im2col_vec4(const struct nir_shader *orig);
 
 #endif

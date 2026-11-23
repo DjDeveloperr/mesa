@@ -22,6 +22,7 @@
 #include "hk_device_memory.h"
 #include "hk_identity_copy4.h"
 #include "hk_private.h"
+#include "hk_pack_loop_bound.h"
 #include "hk_nir_lower_mesh.h"
 
 #include "nir_xfb_info.h"
@@ -253,6 +254,7 @@ struct hk_shader {
    /* Code heap chunk holding the binary, at bo_offset. */
    struct agx_bo *bo;
    uint32_t bo_offset;
+   struct hk_pack_loop_bound pack_loop_bound;
 
    /* Cache of fast linked variants */
    struct {

@@ -15,6 +15,7 @@
 #include "hk_acceleration_structure.h"
 #include "hk_cmd_buffer.h"
 #include "hk_compute_pair.h"
+#include "hk_pack.h"
 #include "hk_nir_match_pointwise_clamp.h"
 #include "hk_g17p_storage_image.h"
 #include "hk_frame_anatomy.h"
@@ -2900,6 +2901,7 @@ static void
 hk_record_compute_pair(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                        const struct hk_api_shader *api,
                        const struct hk_shader *selected,
+                       const uint64_t pack_loop_params[HK_PACK_LOOP_PARAM_COUNT],
                        const uint32_t orig_groups[3], struct agx_grid exec_grid)
 {
    const struct hk_compute_pair_info *info = api ? api->compute_pair : NULL;
@@ -2987,6 +2989,9 @@ hk_record_compute_pair(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    cs->compute_pair = malloc(sizeof(record));
    if (!cs->compute_pair)
       return;
+   if (pack_loop_params)
+      memcpy(record.pack_loop_params, pack_loop_params,
+             sizeof(record.pack_loop_params));
    if (is_producer)
       record.producer = hk_compute_pair_producer_ref(api->compute_pair_producer);
    *cs->compute_pair = record;
@@ -3356,7 +3361,8 @@ hk_check_storage_backing(const struct hk_descriptor_state *desc,
 
 static struct hk_shader *
 hk_select_im2col_vec4(struct hk_cmd_buffer *cmd, struct hk_api_shader *api,
-                      struct hk_shader *normal, struct agx_grid *grid)
+                      struct hk_shader *normal, struct agx_grid *grid,
+                      uint64_t *loop_bound_out)
 {
    struct hk_shader *alt = api->im2col_vec4;
    const struct hk_descriptor_state *desc = &cmd->state.cs.descriptors;
@@ -3455,6 +3461,11 @@ hk_select_im2col_vec4(struct hk_cmd_buffer *cmd, struct hk_api_shader *api,
    grid->count[0] = (uint32_t)gx;
    grid->count[1] = (uint32_t)gy;
    grid->count[2] = (uint32_t)gz;
+   if (loop_bound_out) {
+      uint64_t params[HK_PACK_LOOP_PARAM_COUNT] = {0};
+      params[HK_PACK_LOOP_PARAM_IM2COL_KH] = kh;
+      hk_pack_eval_loop_bound(&alt->pack_loop_bound, params, loop_bound_out);
+   }
    return alt;
 }
 
@@ -3504,7 +3515,8 @@ hk_record_copy4_pair(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 static struct hk_shader *
 hk_select_identity_copy4(struct hk_cmd_buffer *cmd, struct hk_api_shader *api,
                          struct hk_shader *normal, struct agx_grid *grid,
-                         struct hk_copy4_dispatch_cert *cert_out)
+                         struct hk_copy4_dispatch_cert *cert_out,
+                         uint64_t *loop_bound_out)
 {
    struct hk_shader *copy = api->identity_copy4;
    const struct hk_descriptor_state *desc = &cmd->state.cs.descriptors;
@@ -3605,7 +3617,7 @@ hk_select_identity_copy4(struct hk_cmd_buffer *cmd, struct hk_api_shader *api,
    if (info->kind == HK_IDENTITY_COPY4_IM2COL_1X1) {
       uint32_t k;
       if (!hk_identity_copy4_required_bytes(desc, info, *grid, info->local, &bytes, &k))
-         return hk_select_im2col_vec4(cmd, api, normal, grid);
+         return hk_select_im2col_vec4(cmd, api, normal, grid, loop_bound_out);
    } else if (info->kind == HK_IDENTITY_COPY4_LINEAR_COPY ||
               info->kind == HK_IDENTITY_COPY4_LINEAR_OFFSET ||
               info->kind == HK_IDENTITY_COPY4_LINEAR_FADD) {
@@ -3682,7 +3694,9 @@ hk_select_identity_copy4(struct hk_cmd_buffer *cmd, struct hk_api_shader *api,
 
 static struct hk_shader *
 hk_select_depthwise_vec4(struct hk_cmd_buffer *cmd, struct hk_api_shader *api,
-                         struct hk_shader *normal, struct agx_grid *grid)
+                         struct hk_shader *normal, struct agx_grid *grid,
+                         uint64_t pack_loop_params[HK_PACK_LOOP_PARAM_COUNT],
+                         uint64_t *loop_bound_out)
 {
    struct hk_shader *alt = api->depthwise_vec4;
    const struct hk_descriptor_state *desc = &cmd->state.cs.descriptors;
@@ -3793,12 +3807,21 @@ hk_select_depthwise_vec4(struct hk_cmd_buffer *cmd, struct hk_api_shader *api,
    grid->count[0] = gx;
    grid->count[1] = gy;
    grid->count[2] = gz;
+   if (pack_loop_params) {
+      pack_loop_params[HK_PACK_LOOP_PARAM_DW_KH] = (uint32_t)kh;
+      pack_loop_params[HK_PACK_LOOP_PARAM_DW_KW] = (uint32_t)kw;
+   }
+   if (loop_bound_out && pack_loop_params)
+      hk_pack_eval_loop_bound(&alt->pack_loop_bound, pack_loop_params,
+                              loop_bound_out);
    return alt;
 }
 
 static struct hk_shader *
 hk_select_gemm_cmat(struct hk_cmd_buffer *cmd, struct hk_api_shader *api,
-                    struct hk_shader *normal, struct agx_grid *grid)
+                    struct hk_shader *normal, struct agx_grid *grid,
+                    uint64_t pack_loop_params[HK_PACK_LOOP_PARAM_COUNT],
+                    uint64_t *loop_bound_out)
 {
    const struct hk_descriptor_state *desc = &cmd->state.cs.descriptors;
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
@@ -3954,6 +3977,14 @@ hk_select_gemm_cmat(struct hk_cmd_buffer *cmd, struct hk_api_shader *api,
    grid->count[0] = (uint32_t)gx;
    grid->count[1] = (uint32_t)gy;
    grid->count[2] = 1;
+   if (pack_loop_params) {
+      const uint32_t k_step = (tile_n == 32u) ? 16u : 32u;
+      pack_loop_params[HK_PACK_LOOP_PARAM_GEMM_K_ITERS] =
+         DIV_ROUND_UP(k_u, k_step);
+   }
+   if (loop_bound_out && pack_loop_params)
+      hk_pack_eval_loop_bound(&alt->pack_loop_bound, pack_loop_params,
+                              loop_bound_out);
    return alt;
 }
 
@@ -4016,8 +4047,10 @@ dispatch_grid(struct hk_cmd_buffer *cmd, struct agx_grid grid, bool in_threads)
 
    struct hk_shader *selected = s;
    struct hk_copy4_dispatch_cert copy4_cert = {.role = HK_COMPUTE_PAIR_NONE};
+   uint64_t pack_loop_params[HK_PACK_LOOP_PARAM_COUNT] = {0};
+   uint64_t loop_bound = 0;
    if (api && api->identity_copy4 && !api->compute_pair_producer && !in_threads && !invocation_stat) {
-      selected = hk_select_identity_copy4(cmd, api, s, &grid, &copy4_cert);
+      selected = hk_select_identity_copy4(cmd, api, s, &grid, &copy4_cert, &loop_bound);
       /* Record-time no-op self-copy elision: runs after
        * hk_cs_invalidate_compute_pair() and is skipped whenever pipeline stats
        * (invocation_stat), conditional rendering (indirect grid), base_group,
@@ -4032,7 +4065,7 @@ dispatch_grid(struct hk_cmd_buffer *cmd, struct agx_grid grid, bool in_threads)
    } else if (api && api->depthwise_vec4 && api->compute_pair &&
               api->compute_pair->role == HK_COMPUTE_PAIR_DEPTHWISE &&
               !in_threads && !invocation_stat) {
-      selected = hk_select_depthwise_vec4(cmd, api, s, &grid);
+      selected = hk_select_depthwise_vec4(cmd, api, s, &grid, pack_loop_params, &loop_bound);
       local_size = agx_workgroup(selected->b.info.workgroup_size[0],
                                  selected->b.info.workgroup_size[1],
                                  selected->b.info.workgroup_size[2]);
@@ -4040,7 +4073,7 @@ dispatch_grid(struct hk_cmd_buffer *cmd, struct agx_grid grid, bool in_threads)
               api->compute_pair &&
               api->compute_pair->role == HK_COMPUTE_PAIR_GEMM &&
               !in_threads && !invocation_stat) {
-      selected = hk_select_gemm_cmat(cmd, api, s, &grid);
+      selected = hk_select_gemm_cmat(cmd, api, s, &grid, pack_loop_params, &loop_bound);
       local_size = agx_workgroup(selected->b.info.workgroup_size[0],
                                  selected->b.info.workgroup_size[1],
                                  selected->b.info.workgroup_size[2]);
@@ -4072,13 +4105,13 @@ dispatch_grid(struct hk_cmd_buffer *cmd, struct agx_grid grid, bool in_threads)
        (selected == s || selected == api->depthwise_vec4 ||
         selected == api->gemm_cmat16 || selected == api->gemm_cmat32 ||
         selected == api->gemm_cmat64))
-      hk_record_compute_pair(cmd, cs, api, selected, orig_groups, grid);
+      hk_record_compute_pair(cmd, cs, api, selected, pack_loop_params, orig_groups, grid);
    else if (!in_threads && !invocation_stat &&
             copy4_cert.role != HK_COMPUTE_PAIR_NONE)
       hk_record_copy4_pair(cmd, cs, &copy4_cert, orig_groups, grid);
    cs->uses_global_atomics |= selected->b.info.uses_global_atomics;
-   cs->pack_loops |= selected->b.info.has_loops;
    if (agx_is_indirect(grid)) {
+      cs->pack_loops |= selected->b.info.has_loops;
       cs->sib_indirect = true;
    } else {
       const uint64_t threads =
@@ -4087,12 +4120,13 @@ dispatch_grid(struct hk_cmd_buffer *cmd, struct agx_grid grid, bool in_threads)
                            ? UINT64_MAX : cs->sib_threads + threads;
 
       /* What submit packing bounds a packet with (hk_pack_plan()). Static
-       * instruction counts bound a program without loops; pack_loops marks
-       * the others, at most one of which a packet holds. */
-      uint64_t work;
-      if (__builtin_mul_overflow(threads, (uint64_t)selected->b.info.stats.instrs,
-                                 &work))
-         work = UINT64_MAX;
+       * instruction counts bound a program without loops (or a dispatch whose
+       * emitted NIR loop structure has a validated trip bound scaled into work);
+       * pack_loops marks unbounded looping dispatches, at most one per packet. */
+      uint64_t work = 0;
+      cs->pack_loops |= hk_pack_account_dispatch_work(
+         threads, selected->b.info.stats.instrs,
+         selected->b.info.has_loops, loop_bound, &work);
       cs->pack_threads = threads > UINT64_MAX - cs->pack_threads
                             ? UINT64_MAX : cs->pack_threads + threads;
       cs->pack_static_work = work > UINT64_MAX - cs->pack_static_work

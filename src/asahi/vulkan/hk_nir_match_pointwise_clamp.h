@@ -219,6 +219,16 @@ hk_nir_splice_epilogue(const struct nir_shader *producer,
  * depthwise producer (with vec4_valid == true). When `epilogue` is non-NULL,
  * folds that exact clamp epilogue into both pixel outputs; handles both biased
  * and biasless depthwise kernels. */
+struct hk_pack_loop_bound;
+
+struct nir_shader *
+hk_nir_build_depthwise_vec4_with_bound(
+   const struct nir_shader *producer,
+   const struct hk_nir_depthwise_output *info,
+   const struct hk_nir_clamp_epilogue *epilogue,
+   enum hk_compute_pair_dual_write dual_write,
+   struct hk_pack_loop_bound *loop_bound_out);
+
 struct nir_shader *
 hk_nir_build_depthwise_vec4(const struct nir_shader *producer,
                             const struct hk_nir_depthwise_output *info,
@@ -230,6 +240,15 @@ hk_nir_build_depthwise_vec4(const struct nir_shader *producer,
  * cmat_valid == true). When `epilogue` is non-NULL, folds that exact clamp
  * epilogue into output writeback; when `dual_write` is non-zero, also writes
  * the fused copy4 or pad4 destination buffer directly from registers. */
+struct nir_shader *
+hk_nir_build_gemm_cmat_with_bound(
+   const struct nir_shader *producer,
+   const struct hk_nir_gemm_output *info,
+   uint32_t tile_n,
+   const struct hk_nir_clamp_epilogue *epilogue,
+   enum hk_compute_pair_dual_write dual_write,
+   struct hk_pack_loop_bound *loop_bound_out);
+
 struct nir_shader *
 hk_nir_build_gemm_cmat(const struct nir_shader *producer,
                        const struct hk_nir_gemm_output *info,

@@ -1397,6 +1397,77 @@ main(void)
    test_random();
    test_history();
    test_compute_pair_stream_safety();
+
+   /* Bounded-loop accounting, NIR-bound expression eval, and post-fusion budget checks. */
+   {
+      uint64_t w = 0;
+      T("unbounded looping dispatch sets pack_loops",
+        hk_pack_account_dispatch_work(1024, 64, true, 0, &w) && w == 65536);
+      T("bounded looping dispatch scales work and clears pack_loops",
+        !hk_pack_account_dispatch_work(1024, 64, true, 13, &w) && w == 1024ull * 64 * 13);
+      T("bounded looping dispatch over work limit sets pack_loops and saturates",
+        hk_pack_account_dispatch_work(1ull << 24, 256, true, 16, &w) && w == UINT64_MAX);
+      T("overflowing bounded loop sets pack_loops and saturates",
+        hk_pack_account_dispatch_work(UINT64_MAX / 2, 4, true, 4, &w) && w == UINT64_MAX);
+
+      /* Expression evaluator: max(3, kh * (1 + kw)) */
+      struct hk_pack_loop_bound lb = {
+         .valid = true,
+         .count = 7,
+         .ops = {
+            [0] = { .kind = HK_PACK_LOOP_OP_CONST, .imm = 3 },
+            [1] = { .kind = HK_PACK_LOOP_OP_PARAM, .imm = HK_PACK_LOOP_PARAM_DW_KH },
+            [2] = { .kind = HK_PACK_LOOP_OP_CONST, .imm = 1 },
+            [3] = { .kind = HK_PACK_LOOP_OP_PARAM, .imm = HK_PACK_LOOP_PARAM_DW_KW },
+            [4] = { .kind = HK_PACK_LOOP_OP_ADD, .lhs = 2, .rhs = 3 },
+            [5] = { .kind = HK_PACK_LOOP_OP_MUL, .lhs = 1, .rhs = 4 },
+            [6] = { .kind = HK_PACK_LOOP_OP_MAX, .lhs = 0, .rhs = 5 },
+         },
+      };
+      uint64_t params[HK_PACK_LOOP_PARAM_COUNT] = {0};
+      params[HK_PACK_LOOP_PARAM_DW_KH] = 3;
+      params[HK_PACK_LOOP_PARAM_DW_KW] = 3;
+      uint64_t bval = 0;
+      T("eval nested depthwise back-edges expression",
+        hk_pack_eval_loop_bound(&lb, params, &bval) && bval == 12);
+      params[HK_PACK_LOOP_PARAM_DW_KH] = UINT64_MAX;
+      params[HK_PACK_LOOP_PARAM_DW_KW] = 2;
+      T("eval rejects overflow cleanly",
+        !hk_pack_eval_loop_bound(&lb, params, &bval) && bval == 0);
+      lb.valid = false;
+      T("eval rejects invalid loop bound",
+        !hk_pack_eval_loop_bound(&lb, params, &bval) && bval == 0);
+
+      /* Post-fusion run re-accounting (e.g. DUAL_PAD4 zero-fill loop). */
+      uint64_t nw = 0;
+      unsigned nl = 0;
+      T("fusion fits when post-fusion work stays within HK_PACK_MAX_STATIC_WORK",
+        hk_pack_fusion_fits_run(10000, 0, 3000, 0, 4500, false, &nw, &nl) &&
+        nw == 11500 && nl == 0);
+      T("fusion rejected when DUAL_PAD4 zero-fill blows HK_PACK_MAX_STATIC_WORK",
+        !hk_pack_fusion_fits_run(HK_PACK_MAX_STATIC_WORK - 1000, 0, 500, 0,
+                                 5000, false, &nw, &nl));
+      T("fusion rejected when adding a second unbounded loop to a packed run",
+        !hk_pack_fusion_fits_run(10000, 1, 2000, 0, 2000, true, &nw, &nl));
+      T("fusion accepted when replacing the run's only unbounded loop",
+        hk_pack_fusion_fits_run(10000, 1, 2000, 1, 2500, true, &nw, &nl) &&
+        nw == 10500 && nl == 1);
+
+      /* Two bounded-loop members pack into one packet. */
+      struct hk_cmd_buffer *cbs[2] = { plain(1), plain(1) };
+      for (unsigned i = 0; i < 2; ++i) {
+         struct hk_cs *cs = first_cs(cbs[i]);
+         cs->pack_loops = hk_pack_account_dispatch_work(
+            4096, 128, true, 13, &w);
+         cs->pack_static_work = w;
+      }
+      struct hk_pack_run runs[2];
+      unsigned rc = 0;
+      plan_on(cbs, 2, 0, false, runs, &rc);
+      T("two bounded looping members pack into one packet",
+        rc == 1 && runs[0].count == 2);
+   }
+
    printf("%u tests, %u failures\n", tests, failures);
    ralloc_free(test_context);
    return failures ? EXIT_FAILURE : EXIT_SUCCESS;

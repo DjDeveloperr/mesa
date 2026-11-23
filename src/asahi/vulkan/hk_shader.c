@@ -8292,13 +8292,16 @@ hk_compile_compute_alt_nir(struct hk_device *dev,
                            const struct vk_shader_compile_info *info,
                            const VkAllocationCallbacks *allocator,
                            enum hk_feature_key features,
-                           nir_shader *nir)
+                           nir_shader *nir,
+                           const struct hk_pack_loop_bound *loop_bound)
 {
    struct hk_shader *alternate = calloc(1, sizeof(*alternate));
    if (!alternate) {
       ralloc_free(nir);
       return NULL;
    }
+   if (loop_bound)
+      alternate->pack_loop_bound = *loop_bound;
 
    hk_lower_nir(dev, nir, info->robustness, false, info->next_stage_mask,
                 info->set_layout_count, info->set_layouts, features);
@@ -8418,18 +8421,23 @@ hk_compute_pair_get_or_compile_fused(struct hk_device *dev,
    }
 
    nir_shader *fused_nir = NULL;
+   struct hk_pack_loop_bound fused_loop_bound = {0};
    if (alt_kind == HK_COMPUTE_PAIR_ALT_DEPTHWISE_VEC4) {
-      fused_nir = hk_nir_build_depthwise_vec4(prod->nir, &prod->info.depthwise,
-                                              epilogue, dual_write);
+      fused_nir = hk_nir_build_depthwise_vec4_with_bound(
+         prod->nir, &prod->info.depthwise, epilogue, dual_write,
+         &fused_loop_bound);
    } else if (alt_kind == HK_COMPUTE_PAIR_ALT_GEMM_CMAT16) {
-      fused_nir = hk_nir_build_gemm_cmat(prod->nir, &prod->info.gemm, 16,
-                                         epilogue, dual_write);
+      fused_nir = hk_nir_build_gemm_cmat_with_bound(
+         prod->nir, &prod->info.gemm, 16, epilogue, dual_write,
+         &fused_loop_bound);
    } else if (alt_kind == HK_COMPUTE_PAIR_ALT_GEMM_CMAT32) {
-      fused_nir = hk_nir_build_gemm_cmat(prod->nir, &prod->info.gemm, 32,
-                                         epilogue, dual_write);
+      fused_nir = hk_nir_build_gemm_cmat_with_bound(
+         prod->nir, &prod->info.gemm, 32, epilogue, dual_write,
+         &fused_loop_bound);
    } else if (alt_kind == HK_COMPUTE_PAIR_ALT_GEMM_CMAT64) {
-      fused_nir = hk_nir_build_gemm_cmat(prod->nir, &prod->info.gemm, 64,
-                                         epilogue, dual_write);
+      fused_nir = hk_nir_build_gemm_cmat_with_bound(
+         prod->nir, &prod->info.gemm, 64, epilogue, dual_write,
+         &fused_loop_bound);
    } else if (has_ep) {
       const struct hk_nir_clamp_buffer out_buf =
          prod->info.role == HK_COMPUTE_PAIR_DEPTHWISE ? prod->info.depthwise.output
@@ -8448,7 +8456,8 @@ hk_compute_pair_get_or_compile_fused(struct hk_device *dev,
          .robustness = &prod->robustness,
       };
       shader = hk_compile_compute_alt_nir(dev, &synth, &dev->vk.alloc,
-                                          prod->features, fused_nir);
+                                          prod->features, fused_nir,
+                                          &fused_loop_bound);
    }
 
    struct hk_compute_pair_variant var = {
@@ -8490,8 +8499,9 @@ hk_compile_identity_copy4(struct hk_device *dev,
    struct hk_identity_copy4 path = {0};
    nir_shader *copy = hk_nir_copy_identity4(candidate, &path);
    nir_shader *im2col4 = NULL;
+   struct hk_pack_loop_bound im2col4_lb = {0};
    if (copy && path.kind == HK_IDENTITY_COPY4_IM2COL_1X1 && path.im2col_vec4_ok)
-      im2col4 = hk_nir_im2col_vec4(candidate);
+      im2col4 = hk_nir_im2col_vec4_with_bound(candidate, &im2col4_lb);
    ralloc_free(candidate);
    if (!copy) {
       ralloc_free(im2col4);
@@ -8499,7 +8509,7 @@ hk_compile_identity_copy4(struct hk_device *dev,
    }
 
    struct hk_shader *alternate =
-      hk_compile_compute_alt_nir(dev, info, allocator, features, copy);
+      hk_compile_compute_alt_nir(dev, info, allocator, features, copy, NULL);
    if (!alternate) {
       ralloc_free(im2col4);
       return NULL;
@@ -8507,7 +8517,8 @@ hk_compile_identity_copy4(struct hk_device *dev,
 
    if (im2col4)
       *im2col_vec4_out =
-         hk_compile_compute_alt_nir(dev, info, allocator, features, im2col4);
+         hk_compile_compute_alt_nir(dev, info, allocator, features, im2col4,
+                                    &im2col4_lb);
 
    *path_out = path;
    return alternate;
@@ -8529,6 +8540,10 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
    nir_shader *gemm_cmat16_nir = NULL;
    nir_shader *gemm_cmat32_nir = NULL;
    nir_shader *gemm_cmat64_nir = NULL;
+   struct hk_pack_loop_bound depthwise_vec4_lb = {0};
+   struct hk_pack_loop_bound gemm_cmat16_lb = {0};
+   struct hk_pack_loop_bound gemm_cmat32_lb = {0};
+   struct hk_pack_loop_bound gemm_cmat64_lb = {0};
    struct hk_shader *identity_copy4 = NULL;
    struct hk_shader *im2col_vec4 = NULL;
    struct hk_identity_copy4 identity_copy4_info = {0};
@@ -8631,19 +8646,23 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
                   dev, info, hk_features, &pair, nir);
                if (pair.role == HK_COMPUTE_PAIR_DEPTHWISE &&
                    pair.depthwise.vec4_valid) {
-                  depthwise_vec4_nir =
-                     hk_nir_build_depthwise_vec4(nir, &pair.depthwise, NULL, HK_COMPUTE_PAIR_DUAL_NONE);
+                  depthwise_vec4_nir = hk_nir_build_depthwise_vec4_with_bound(
+                     nir, &pair.depthwise, NULL, HK_COMPUTE_PAIR_DUAL_NONE,
+                     &depthwise_vec4_lb);
                } else if (pair.role == HK_COMPUTE_PAIR_GEMM &&
                           pair.gemm.cmat_valid &&
                           agx_chip_cooperative_matrix_supported(dev->dev.chip)) {
                   if (pair.gemm.is_guarded) {
-                     gemm_cmat16_nir =
-                        hk_nir_build_gemm_cmat(nir, &pair.gemm, 16, NULL, HK_COMPUTE_PAIR_DUAL_NONE);
+                     gemm_cmat16_nir = hk_nir_build_gemm_cmat_with_bound(
+                        nir, &pair.gemm, 16, NULL, HK_COMPUTE_PAIR_DUAL_NONE,
+                        &gemm_cmat16_lb);
                   }
-                  gemm_cmat32_nir =
-                     hk_nir_build_gemm_cmat(nir, &pair.gemm, 32, NULL, HK_COMPUTE_PAIR_DUAL_NONE);
-                  gemm_cmat64_nir =
-                     hk_nir_build_gemm_cmat(nir, &pair.gemm, 64, NULL, HK_COMPUTE_PAIR_DUAL_NONE);
+                  gemm_cmat32_nir = hk_nir_build_gemm_cmat_with_bound(
+                     nir, &pair.gemm, 32, NULL, HK_COMPUTE_PAIR_DUAL_NONE,
+                     &gemm_cmat32_lb);
+                  gemm_cmat64_nir = hk_nir_build_gemm_cmat_with_bound(
+                     nir, &pair.gemm, 64, NULL, HK_COMPUTE_PAIR_DUAL_NONE,
+                     &gemm_cmat64_lb);
                }
             }
          }
@@ -8868,19 +8887,23 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
          const enum hk_feature_key hk_features = hk_make_feature_key(features);
          if (depthwise_vec4_nir) {
             obj->depthwise_vec4 = hk_compile_compute_alt_nir(
-               dev, info, pAllocator, hk_features, depthwise_vec4_nir);
+               dev, info, pAllocator, hk_features, depthwise_vec4_nir,
+               &depthwise_vec4_lb);
          }
          if (gemm_cmat16_nir) {
             obj->gemm_cmat16 = hk_compile_compute_alt_nir(
-               dev, info, pAllocator, hk_features, gemm_cmat16_nir);
+               dev, info, pAllocator, hk_features, gemm_cmat16_nir,
+               &gemm_cmat16_lb);
          }
          if (gemm_cmat32_nir) {
             obj->gemm_cmat32 = hk_compile_compute_alt_nir(
-               dev, info, pAllocator, hk_features, gemm_cmat32_nir);
+               dev, info, pAllocator, hk_features, gemm_cmat32_nir,
+               &gemm_cmat32_lb);
          }
          if (gemm_cmat64_nir) {
             obj->gemm_cmat64 = hk_compile_compute_alt_nir(
-               dev, info, pAllocator, hk_features, gemm_cmat64_nir);
+               dev, info, pAllocator, hk_features, gemm_cmat64_nir,
+               &gemm_cmat64_lb);
          }
       } else {
          hk_compute_pair_producer_unref(compute_pair_producer);

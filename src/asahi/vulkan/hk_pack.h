@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "hk_pack_loop_bound.h"
 #include "hk_sync.h"
 
 struct hk_cmd_buffer;
@@ -83,6 +84,15 @@ enum hk_pack_boundary {
 };
 
 enum hk_pack_boundary hk_pack_boundary(const struct hk_device *dev);
+
+bool hk_pack_account_dispatch_work(uint64_t threads, uint64_t instrs,
+                                   bool has_loops, uint64_t loop_bound,
+                                   uint64_t *work_out);
+
+bool hk_pack_fusion_fits_run(uint64_t run_work, unsigned run_loops,
+                             uint64_t replaced_work, unsigned replaced_loops,
+                             uint64_t fused_work, bool fused_loops,
+                             uint64_t *new_work_out, unsigned *new_loops_out);
 
 /* Whether a member may end with a strong flush without memory scope, as an
  * application barrier at the end of a command buffer leaves it: at every

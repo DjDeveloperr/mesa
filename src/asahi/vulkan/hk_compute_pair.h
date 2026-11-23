@@ -3,6 +3,7 @@
 
 #include "hk_descriptor_set.h"
 #include "hk_nir_match_pointwise_clamp.h"
+#include "hk_pack_loop_bound.h"
 #include "hk_private.h"
 #include "hk_shader.h"
 #include "util/simple_mtx.h"
@@ -122,6 +123,7 @@ struct hk_compute_pair_dispatch {
    uint32_t cs_base_group[3];
    uint64_t printf_buffer_address;
    enum hk_compute_pair_alt_kind alt_kind;
+   uint64_t pack_loop_params[HK_PACK_LOOP_PARAM_COUNT];
    struct hk_compute_pair_producer *producer;
 };
 

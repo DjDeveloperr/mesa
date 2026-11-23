@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "hk_nir_match_pointwise_clamp.h"
+#include "hk_nir_loop_bound.h"
 
 #include <math.h>
 #include <string.h>
@@ -4392,13 +4393,15 @@ emit_dw_kx_streamed(nir_builder *b, const struct hk_nir_depthwise_output *info,
                     nir_def *kw, nir_def *kh, unsigned stride_x,
                     nir_def *in_base0, nir_def *ch4, nir_def *c4,
                     nir_def *dy_step4, nir_def *wt_row4,
-                    nir_def *zero_v4, nir_def **a0_out, nir_def **a1_out)
+                    nir_def *zero_v4, nir_def **a0_out, nir_def **a1_out,
+                    struct hk_nir_loop_binding_list *lb_list)
 {
    const enum gl_access_qualifier read = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER;
    nir_def *zero_i = nir_imm_int(b, 0);
    nir_def *sx_off = (stride_x == 2) ? nir_ishl_imm(b, c4, 1) : NULL;
 
    nir_loop *ky_lp = nir_push_loop(b);
+   hk_nir_loop_binding_add(lb_list, ky_lp, HK_PACK_LOOP_PARAM_DW_KH);
    ky_lp->control = nir_loop_control_dont_unroll;
    nir_block *ky_pre = nir_cf_node_as_block(nir_cf_node_prev(&ky_lp->cf_node));
    nir_block *ky_hdr = nir_loop_first_block(ky_lp);
@@ -4435,6 +4438,7 @@ emit_dw_kx_streamed(nir_builder *b, const struct hk_nir_depthwise_output *info,
       : zero_v4;
 
    nir_loop *kx_lp = nir_push_loop(b);
+   hk_nir_loop_binding_add(lb_list, kx_lp, HK_PACK_LOOP_PARAM_DW_KW);
    kx_lp->control = nir_loop_control_dont_unroll;
    nir_block *kx_pre = nir_cf_node_as_block(nir_cf_node_prev(&kx_lp->cf_node));
    nir_block *kx_hdr = nir_loop_first_block(kx_lp);
@@ -4532,11 +4536,14 @@ dual_push_u64(nir_builder *b, uint32_t offset_B, uint32_t push_bytes)
 }
 
 nir_shader *
-hk_nir_build_depthwise_vec4(const nir_shader *producer,
-                            const struct hk_nir_depthwise_output *info,
-                            const struct hk_nir_clamp_epilogue *epilogue,
-                            enum hk_compute_pair_dual_write dual_write)
+hk_nir_build_depthwise_vec4_with_bound(
+   const nir_shader *producer,
+   const struct hk_nir_depthwise_output *info,
+   const struct hk_nir_clamp_epilogue *epilogue,
+   enum hk_compute_pair_dual_write dual_write,
+   struct hk_pack_loop_bound *loop_bound_out)
 {
+   struct hk_nir_loop_binding_list lb_list = {0};
    if (!producer || !info || !info->vec4_valid ||
        info->desc_comps < 3 || info->desc_comps > 5)
       return NULL;
@@ -4647,7 +4654,7 @@ hk_nir_build_depthwise_vec4(const nir_shader *producer,
          nir_if *s1_if = nir_push_if(&b, is_s1_d1);
          {
             emit_dw_kx_streamed(&b, info, kw, kh, 1, in_base0, ch4, c4, dy_step4, wt_row4,
-                                zero_v4, &a0_s1, &a1_s1);
+                                zero_v4, &a0_s1, &a1_s1, &lb_list);
          }
          nir_push_else(&b, s1_if);
          {
@@ -4657,12 +4664,13 @@ hk_nir_build_depthwise_vec4(const nir_shader *producer,
             nir_if *s2_if = nir_push_if(&b, is_s2_d1);
             {
                emit_dw_kx_streamed(&b, info, kw, kh, 2, in_base0, ch4, c4, dy_step4, wt_row4,
-                                   zero_v4, &a0_s2, &a1_s2);
+                                   zero_v4, &a0_s2, &a1_s2, &lb_list);
             }
             nir_push_else(&b, s2_if);
             {
                nir_def *zero_i = nir_imm_int(&b, 0);
                nir_loop *oy_lp = nir_push_loop(&b);
+               hk_nir_loop_binding_add(&lb_list, oy_lp, HK_PACK_LOOP_PARAM_DW_KH);
                oy_lp->control = nir_loop_control_dont_unroll;
                nir_block *oy_pre = nir_cf_node_as_block(nir_cf_node_prev(&oy_lp->cf_node));
                nir_block *oy_hdr = nir_loop_first_block(oy_lp);
@@ -4692,6 +4700,7 @@ hk_nir_build_depthwise_vec4(const nir_shader *producer,
                nir_pop_if(&b, oy_done);
 
                nir_loop *ix_lp = nir_push_loop(&b);
+               hk_nir_loop_binding_add(&lb_list, ix_lp, HK_PACK_LOOP_PARAM_DW_KW);
                ix_lp->control = nir_loop_control_dont_unroll;
                nir_block *ix_pre = nir_cf_node_as_block(nir_cf_node_prev(&ix_lp->cf_node));
                nir_block *ix_hdr = nir_loop_first_block(ix_lp);
@@ -4783,6 +4792,7 @@ hk_nir_build_depthwise_vec4(const nir_shader *producer,
 
          nir_def *zero_i = nir_imm_int(&b, 0);
          nir_loop *oy_lp = nir_push_loop(&b);
+         hk_nir_loop_binding_add(&lb_list, oy_lp, HK_PACK_LOOP_PARAM_DW_KH);
          oy_lp->control = nir_loop_control_dont_unroll;
          nir_block *oy_pre = nir_cf_node_as_block(nir_cf_node_prev(&oy_lp->cf_node));
          nir_block *oy_hdr = nir_loop_first_block(oy_lp);
@@ -4811,6 +4821,7 @@ hk_nir_build_depthwise_vec4(const nir_shader *producer,
             nir_def *wt_y4 = nir_iadd(&b, nir_imul(&b, &ky_phi->def, wt_row4), ch4);
 
             nir_loop *ix_lp = nir_push_loop(&b);
+            hk_nir_loop_binding_add(&lb_list, ix_lp, HK_PACK_LOOP_PARAM_DW_KW);
             ix_lp->control = nir_loop_control_dont_unroll;
             nir_block *ix_pre = nir_cf_node_as_block(nir_cf_node_prev(&ix_lp->cf_node));
             nir_block *ix_hdr = nir_loop_first_block(ix_lp);
@@ -4983,7 +4994,24 @@ hk_nir_build_depthwise_vec4(const nir_shader *producer,
 
    nir_opt_dce(nir);
    nir_shader_gather_info(nir, impl);
+   if (loop_bound_out) {
+      if (lb_list.overflow)
+         memset(loop_bound_out, 0, sizeof(*loop_bound_out));
+      else
+         hk_nir_compute_pack_loop_bound(nir, lb_list.entries, lb_list.count,
+                                        loop_bound_out);
+   }
    return nir;
+}
+
+nir_shader *
+hk_nir_build_depthwise_vec4(const nir_shader *producer,
+                            const struct hk_nir_depthwise_output *info,
+                            const struct hk_nir_clamp_epilogue *epilogue,
+                            enum hk_compute_pair_dual_write dual_write)
+{
+   return hk_nir_build_depthwise_vec4_with_bound(producer, info, epilogue,
+                                                 dual_write, NULL);
 }
 
 static nir_def *
@@ -5043,12 +5071,14 @@ struct hk_gemm_dual_ctx {
 static void
 emit_pad4_zero_xrange(nir_builder *b, nir_def *dst2_va, nir_def *oy,
                       nir_def *x_start, nir_def *x_end, nir_def *out_w,
-                      nir_def *n, nir_def *col, unsigned comps)
+                      nir_def *n, nir_def *col, unsigned comps,
+                      struct hk_nir_loop_binding_list *lb_list)
 {
    nir_def *zero_f = nir_imm_float(b, 0.0f);
    nir_def *zero_v = comps == 2 ? nir_vec2(b, zero_f, zero_f) : zero_f;
    nir_def *row_y = nir_imul(b, oy, out_w);
    nir_loop *xlp = nir_push_loop(b);
+   hk_nir_loop_binding_add(lb_list, xlp, HK_PACK_LOOP_PARAM_PAD_W);
    xlp->control = nir_loop_control_dont_unroll;
    nir_block *xpre = nir_cf_node_as_block(nir_cf_node_prev(&xlp->cf_node));
    nir_block *xhdr = nir_loop_first_block(xlp);
@@ -5075,11 +5105,13 @@ emit_pad4_zero_yrange_x(nir_builder *b, nir_def *dst2_va,
                         nir_def *y_start, nir_def *y_end,
                         nir_def *ox_mid, nir_def *is_x0, nir_def *is_xlast,
                         nir_def *pad_w0, nir_def *in_w, nir_def *out_w,
-                        nir_def *n, nir_def *col, unsigned comps)
+                        nir_def *n, nir_def *col, unsigned comps,
+                        struct hk_nir_loop_binding_list *lb_list)
 {
    nir_def *zero_f = nir_imm_float(b, 0.0f);
    nir_def *zero_v = comps == 2 ? nir_vec2(b, zero_f, zero_f) : zero_f;
    nir_loop *ylp = nir_push_loop(b);
+   hk_nir_loop_binding_add(lb_list, ylp, HK_PACK_LOOP_PARAM_PAD_H);
    ylp->control = nir_loop_control_dont_unroll;
    nir_block *ypre = nir_cf_node_as_block(nir_cf_node_prev(&ylp->cf_node));
    nir_block *yhdr = nir_loop_first_block(ylp);
@@ -5098,11 +5130,11 @@ emit_pad4_zero_yrange_x(nir_builder *b, nir_def *dst2_va,
                     .access = ACCESS_NON_READABLE);
 
    nir_if *lx = nir_push_if(b, is_x0);
-   emit_pad4_zero_xrange(b, dst2_va, oy, nir_imm_int(b, 0), pad_w0, out_w, n, col, comps);
+   emit_pad4_zero_xrange(b, dst2_va, oy, nir_imm_int(b, 0), pad_w0, out_w, n, col, comps, lb_list);
    nir_pop_if(b, lx);
 
    nir_if *rx = nir_push_if(b, is_xlast);
-   emit_pad4_zero_xrange(b, dst2_va, oy, nir_iadd(b, pad_w0, in_w), out_w, out_w, n, col, comps);
+   emit_pad4_zero_xrange(b, dst2_va, oy, nir_iadd(b, pad_w0, in_w), out_w, out_w, n, col, comps, lb_list);
    nir_pop_if(b, rx);
 
    nir_def *ynext = nir_iadd_imm(b, oy, 1);
@@ -5115,7 +5147,7 @@ emit_pad4_zero_yrange_x(nir_builder *b, nir_def *dst2_va,
 static void
 emit_pad4_simple_border(nir_builder *b, const struct hk_gemm_dual_ctx *dual,
                         nir_def *iy, nir_def *ix, nir_def *n, nir_def *col,
-                        unsigned comps)
+                        unsigned comps, struct hk_nir_loop_binding_list *lb_list)
 {
    nir_def *is_x0 = nir_ieq_imm(b, ix, 0);
    nir_def *is_xlast = nir_ieq(b, ix, nir_iadd_imm(b, dual->in_w, -1));
@@ -5128,26 +5160,26 @@ emit_pad4_simple_border(nir_builder *b, const struct hk_gemm_dual_ctx *dual,
       nir_def *ox_mid = nir_iadd(b, ix, dual->pad_w0);
       nir_if *lx = nir_push_if(b, is_x0);
       emit_pad4_zero_xrange(b, dual->dst2_va, oy_mid, nir_imm_int(b, 0),
-                            dual->pad_w0, dual->out_w, n, col, comps);
+                            dual->pad_w0, dual->out_w, n, col, comps, lb_list);
       nir_pop_if(b, lx);
 
       nir_if *rx = nir_push_if(b, is_xlast);
       emit_pad4_zero_xrange(b, dual->dst2_va, oy_mid,
                             nir_iadd(b, dual->pad_w0, dual->in_w), dual->out_w,
-                            dual->out_w, n, col, comps);
+                            dual->out_w, n, col, comps, lb_list);
       nir_pop_if(b, rx);
 
       nir_if *ty = nir_push_if(b, is_y0);
       emit_pad4_zero_yrange_x(b, dual->dst2_va, nir_imm_int(b, 0), dual->pad_h0,
                               ox_mid, is_x0, is_xlast, dual->pad_w0, dual->in_w,
-                              dual->out_w, n, col, comps);
+                              dual->out_w, n, col, comps, lb_list);
       nir_pop_if(b, ty);
 
       nir_if *by = nir_push_if(b, is_ylast);
       emit_pad4_zero_yrange_x(b, dual->dst2_va,
                               nir_iadd(b, dual->pad_h0, dual->in_h), dual->out_h,
                               ox_mid, is_x0, is_xlast, dual->pad_w0, dual->in_w,
-                              dual->out_w, n, col, comps);
+                              dual->out_w, n, col, comps, lb_list);
       nir_pop_if(b, by);
    }
    nir_pop_if(b, ef);
@@ -5534,12 +5566,15 @@ emit_gemm_cmat_store_guarded_row(nir_builder *b, const struct hk_nir_gemm_output
 }
 
 nir_shader *
-hk_nir_build_gemm_cmat(const nir_shader *producer,
-                       const struct hk_nir_gemm_output *info,
-                       uint32_t tile_n,
-                       const struct hk_nir_clamp_epilogue *epilogue,
-                       enum hk_compute_pair_dual_write dual_write)
+hk_nir_build_gemm_cmat_with_bound(
+   const nir_shader *producer,
+   const struct hk_nir_gemm_output *info,
+   uint32_t tile_n,
+   const struct hk_nir_clamp_epilogue *epilogue,
+   enum hk_compute_pair_dual_write dual_write,
+   struct hk_pack_loop_bound *loop_bound_out)
 {
+   struct hk_nir_loop_binding_list lb_list = {0};
    if (!producer || !info || !info->cmat_valid ||
        (tile_n != 16 && tile_n != 32 && tile_n != 64))
       return NULL;
@@ -5699,6 +5734,7 @@ hk_nir_build_gemm_cmat(const nir_shader *producer,
    nir_def *zero_v4 = nir_vec4(&b, zero_f, zero_f, zero_f, zero_f);
 
    nir_loop *k_lp = nir_push_loop(&b);
+   hk_nir_loop_binding_add(&lb_list, k_lp, HK_PACK_LOOP_PARAM_GEMM_K_ITERS);
    k_lp->control = nir_loop_control_dont_unroll;
    nir_block *k_pre = nir_cf_node_as_block(nir_cf_node_prev(&k_lp->cf_node));
    nir_block *k_hdr = nir_loop_first_block(k_lp);
@@ -6352,7 +6388,7 @@ hk_nir_build_gemm_cmat(const nir_shader *producer,
                   nir_pop_if(&b, tdone);
 
                   nir_def *col_t = nir_iadd(&b, c_col0, nir_ishl_imm(&b, &tphi->def, 3));
-                  emit_pad4_simple_border(&b, &dual, iy, ix, n, col_t, 2);
+                  emit_pad4_simple_border(&b, &dual, iy, ix, n, col_t, 2, &lb_list);
 
                   nir_block *tback = nir_cursor_current_block(b.cursor);
                   nir_phi_instr_add_src(tphi, tback, nir_iadd_imm(&b, &tphi->def, 1));
@@ -6375,7 +6411,7 @@ hk_nir_build_gemm_cmat(const nir_shader *producer,
                      nir_iadd(&b, nir_ishl_imm(&b, nir_ushr_imm(&b, &sphi->def, 1), 3),
                               nir_iand_imm(&b, &sphi->def, 1)));
                   nir_if *cn_if = nir_push_if(&b, nir_ult(&b, col_s, n));
-                  emit_pad4_simple_border(&b, &dual, iy, ix, n, col_s, 1);
+                  emit_pad4_simple_border(&b, &dual, iy, ix, n, col_s, 1, &lb_list);
                   nir_pop_if(&b, cn_if);
 
                   nir_block *sback = nir_cursor_current_block(b.cursor);
@@ -6480,6 +6516,7 @@ hk_nir_build_gemm_cmat(const nir_shader *producer,
          nir_def *zero_fb = nir_imm_float(&b, 0.0f);
 
          nir_loop *zlp = nir_push_loop(&b);
+         hk_nir_loop_binding_add(&lb_list, zlp, HK_PACK_LOOP_PARAM_PAD_ZLP_ITERS);
          zlp->control = nir_loop_control_dont_unroll;
          nir_block *zpre = nir_cf_node_as_block(nir_cf_node_prev(&zlp->cf_node));
          nir_block *zhdr = nir_loop_first_block(zlp);
@@ -6528,5 +6565,23 @@ hk_nir_build_gemm_cmat(const nir_shader *producer,
    nir_opt_dce(nir);
    nir_shader_gather_info(nir, impl);
    nir_validate_shader(nir, "hk_nir_build_gemm_cmat");
+   if (loop_bound_out) {
+      if (lb_list.overflow)
+         memset(loop_bound_out, 0, sizeof(*loop_bound_out));
+      else
+         hk_nir_compute_pack_loop_bound(nir, lb_list.entries, lb_list.count,
+                                        loop_bound_out);
+   }
    return nir;
+}
+
+nir_shader *
+hk_nir_build_gemm_cmat(const nir_shader *producer,
+                       const struct hk_nir_gemm_output *info,
+                       uint32_t tile_n,
+                       const struct hk_nir_clamp_epilogue *epilogue,
+                       enum hk_compute_pair_dual_write dual_write)
+{
+   return hk_nir_build_gemm_cmat_with_bound(producer, info, tile_n, epilogue,
+                                            dual_write, NULL);
 }

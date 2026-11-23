@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "hk_identity_copy4.h"
+#include "hk_nir_loop_bound.h"
 #include "compiler/nir/nir_builder.h"
 
 static nir_scalar
@@ -1938,8 +1939,10 @@ build_pad4d_vec4(nir_shader *nir, const struct pad4d_match *m,
 }
 
 nir_shader *
-hk_nir_im2col_vec4(const nir_shader *orig)
+hk_nir_im2col_vec4_with_bound(const nir_shader *orig,
+                              struct hk_pack_loop_bound *loop_bound_out)
 {
+   struct hk_nir_loop_binding_list lb_list = {0};
    nir_shader *nir = nir_shader_clone(NULL, orig);
    nir_opt_constant_folding(nir);
 
@@ -2036,6 +2039,7 @@ hk_nir_im2col_vec4(const nir_shader *orig)
          }
 
          nir_loop *lp = nir_push_loop(&b);
+         hk_nir_loop_binding_add(&lb_list, lp, HK_PACK_LOOP_PARAM_IM2COL_KH);
          lp->control = nir_loop_control_dont_unroll;
          nir_block *pre = nir_cf_node_as_block(nir_cf_node_prev(&lp->cf_node));
          nir_block *hdr = nir_loop_first_block(lp);
@@ -2107,6 +2111,7 @@ hk_nir_im2col_vec4(const nir_shader *orig)
          }
 
          nir_loop *lp = nir_push_loop(&b);
+         hk_nir_loop_binding_add(&lb_list, lp, HK_PACK_LOOP_PARAM_IM2COL_KH);
          lp->control = nir_loop_control_dont_unroll;
          nir_block *pre = nir_cf_node_as_block(nir_cf_node_prev(&lp->cf_node));
          nir_block *hdr = nir_loop_first_block(lp);
@@ -2159,7 +2164,20 @@ hk_nir_im2col_vec4(const nir_shader *orig)
 
    nir_opt_dce(nir);
    nir_shader_gather_info(nir, impl);
+   if (loop_bound_out) {
+      if (lb_list.overflow)
+         memset(loop_bound_out, 0, sizeof(*loop_bound_out));
+      else
+         hk_nir_compute_pack_loop_bound(nir, lb_list.entries, lb_list.count,
+                                        loop_bound_out);
+   }
    return nir;
+}
+
+nir_shader *
+hk_nir_im2col_vec4(const nir_shader *orig)
+{
+   return hk_nir_im2col_vec4_with_bound(orig, NULL);
 }
 
 nir_shader *

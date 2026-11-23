@@ -13,6 +13,7 @@
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
 #include "hk_identity_copy4.h"
+#include "hk_pack_loop_bound.h"
 #include "hk_nir_eval_test.h"
 
 static nir_deref_instr *
@@ -642,7 +643,15 @@ test_im2col_bit_exact(void)
       HK_EVAL_CHECK(info.stride_height_offset == l->sh);
       HK_EVAL_CHECK(info.channels_offset == l->ch);
 
-      nir_shader *vec4_alt = hk_nir_im2col_vec4(orig);
+      struct hk_pack_loop_bound im2_lb = {0};
+      nir_shader *vec4_alt = hk_nir_im2col_vec4_with_bound(orig, &im2_lb);
+      HK_EVAL_CHECK(vec4_alt != NULL && im2_lb.valid);
+      {
+         uint64_t params[HK_PACK_LOOP_PARAM_COUNT] = {0};
+         params[HK_PACK_LOOP_PARAM_IM2COL_KH] = 3;
+         uint64_t bval = 0;
+         HK_EVAL_CHECK(hk_pack_eval_loop_bound(&im2_lb, params, &bval) && bval == 4);
+      }
       HK_EVAL_CHECK(vec4_alt != NULL);
       nir_validate_shader(vec4_alt, "im2col vec4 alt");
 

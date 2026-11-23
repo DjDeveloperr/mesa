@@ -2962,6 +2962,17 @@ hk_pack_runs(struct hk_device *dev, const struct hk_queue *queue,
       for (unsigned r = 0; r < run_count; ++r) {
          const unsigned start = runs[r].first;
          const unsigned end = start + runs[r].count;
+         uint64_t run_work = 0;
+         unsigned run_loops = 0;
+         for (unsigned j = start; j < end; ++j) {
+            if (members[j].cs) {
+               run_work = members[j].cs->pack_static_work > UINT64_MAX - run_work
+                             ? UINT64_MAX
+                             : run_work + members[j].cs->pack_static_work;
+               if (members[j].cs->pack_loops)
+                  run_loops++;
+            }
+         }
          for (unsigned i = start; i < end; ++i) {
             const struct hk_cs *cs_i = members[i].cs;
             if (!cs_i || !hk_compute_pair_stream_eligible(cs_i))
@@ -3013,25 +3024,96 @@ hk_pack_runs(struct hk_device *dev, const struct hk_queue *queue,
             if (!ep && dual == HK_COMPUTE_PAIR_DUAL_NONE)
                continue;
 
-            struct hk_shader *fused = hk_compute_pair_get_or_compile_fused(
-               dev, p->producer, ep, p->alt_kind, dual);
-            if (!fused || !hk_fused_compute_shader_eligible(dev, fused, p)) {
-               /* If dual-write compilation failed but clamp-only is available,
-                * fall back cleanly to clamp-only fusion. */
-               if (ep && dual != HK_COMPUTE_PAIR_DUAL_NONE) {
+            struct hk_shader *fused = NULL;
+            uint64_t new_run_work = run_work;
+            unsigned new_run_loops = run_loops;
+            unsigned span = 0;
+            for (unsigned attempt = 0; attempt < 2; ++attempt) {
+               if (attempt == 1) {
+                  if (!ep || dual == HK_COMPUTE_PAIR_DUAL_NONE) {
+                     fused = NULL;
+                     break;
+                  }
                   dual = HK_COMPUTE_PAIR_DUAL_NONE;
                   dual_idx = 0;
-                  fused = hk_compute_pair_get_or_compile_fused(
-                     dev, p->producer, ep, p->alt_kind, HK_COMPUTE_PAIR_DUAL_NONE);
-                  if (!fused || !hk_fused_compute_shader_eligible(dev, fused, p))
-                     continue;
-               } else {
-                  continue;
                }
-            }
+               struct hk_shader *cand = hk_compute_pair_get_or_compile_fused(
+                  dev, p->producer, ep, p->alt_kind, dual);
+               if (!cand || !hk_fused_compute_shader_eligible(dev, cand, p))
+                  continue;
 
-            const unsigned span =
-               dual != HK_COMPUTE_PAIR_DUAL_NONE ? (dual_idx - i + 1) : 2u;
+               const unsigned cand_span =
+                  dual != HK_COMPUTE_PAIR_DUAL_NONE ? (dual_idx - i + 1) : 2u;
+               uint64_t replaced_work = 0;
+               unsigned replaced_loops = 0;
+               bool replaced_overflow = false;
+               for (unsigned j = i; j < i + cand_span; ++j) {
+                  if (members[j].cs) {
+                     if (__builtin_add_overflow(replaced_work,
+                                                members[j].cs->pack_static_work,
+                                                &replaced_work)) {
+                        replaced_overflow = true;
+                        break;
+                     }
+                     if (members[j].cs->pack_loops)
+                        replaced_loops++;
+                  }
+               }
+               if (replaced_overflow)
+                  continue;
+
+               const uint64_t fused_threads =
+                  (uint64_t)p->exec_threads[0] *
+                  (uint64_t)p->exec_threads[1] *
+                  (uint64_t)p->exec_threads[2];
+               uint64_t fused_params[HK_PACK_LOOP_PARAM_COUNT];
+               memcpy(fused_params, p->pack_loop_params, sizeof(fused_params));
+               bool params_ok = true;
+               if (dual == HK_COMPUTE_PAIR_DUAL_PAD4) {
+                  const struct hk_compute_pair_pad4 *pad =
+                     &members[dual_idx].cs->compute_pair->extra.pad4;
+                  fused_params[HK_PACK_LOOP_PARAM_PAD_H] =
+                     pad->out_shape[1] > pad->in_shape[1]
+                        ? (uint64_t)(pad->out_shape[1] - pad->in_shape[1]) : 0;
+                  fused_params[HK_PACK_LOOP_PARAM_PAD_W] =
+                     pad->out_shape[2] > pad->in_shape[2]
+                        ? (uint64_t)(pad->out_shape[2] - pad->in_shape[2]) : 0;
+                  uint64_t hw = 0, out_total = 0;
+                  if (fused_threads == 0 ||
+                      __builtin_mul_overflow((uint64_t)pad->out_shape[1],
+                                             (uint64_t)pad->out_shape[2], &hw) ||
+                      __builtin_mul_overflow(hw, (uint64_t)pad->out_shape[3],
+                                             &out_total)) {
+                     params_ok = false;
+                  } else {
+                     fused_params[HK_PACK_LOOP_PARAM_PAD_ZLP_ITERS] =
+                        DIV_ROUND_UP(out_total, fused_threads);
+                  }
+               }
+
+               uint64_t fused_bound = 0;
+               if (params_ok)
+                  hk_pack_eval_loop_bound(&cand->pack_loop_bound, fused_params,
+                                          &fused_bound);
+               uint64_t fused_work = 0;
+               const bool fused_loops = hk_pack_account_dispatch_work(
+                  fused_threads, cand->b.info.stats.instrs,
+                  cand->b.info.has_loops, fused_bound, &fused_work);
+
+               if (!hk_pack_fusion_fits_run(run_work, run_loops,
+                                            replaced_work, replaced_loops,
+                                            fused_work, fused_loops,
+                                            &new_run_work, &new_run_loops))
+                  continue;
+
+               fused = cand;
+               span = cand_span;
+               break;
+            }
+            if (!fused)
+               continue;
+            run_work = new_run_work;
+            run_loops = new_run_loops;
             plans[i] = (struct hk_pack_fuse_plan){
                .shader = fused,
                .dual_write = dual,
