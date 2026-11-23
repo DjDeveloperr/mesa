@@ -9878,7 +9878,7 @@ agx_lower_front_face(struct nir_builder *b, nir_intrinsic_instr *intr,
  * the latter run should be almost a no-op.
  */
 static void
-agx_optimize_loop_nir(nir_shader *nir, bool m5, bool g17p)
+agx_optimize_loop_nir(nir_shader *nir, bool m5, bool expensive_flatten)
 {
    const nir_shader_compiler_options *saved_options = nir->options;
    nir_shader_compiler_options options;
@@ -9893,7 +9893,8 @@ agx_optimize_loop_nir(nir_shader *nir, bool m5, bool g17p)
    nir_opt_peephole_select_options peephole_select_options = {
       .limit = 64,
       .expensive_alu_ok = true,
-      .expensive_limit = g17p ? AGX_G17P_EXPENSIVE_FLATTEN_LIMIT : 0,
+      .expensive_limit =
+         expensive_flatten ? AGX_G17P_EXPENSIVE_FLATTEN_LIMIT : 0,
    };
 
    /* Exact circular fixed-point over the 12-pass cycle. Single-pass idempotent
@@ -10497,10 +10498,11 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
                  struct blob *pre_preamble_blob, bool pre_preamble_optimized,
                  bool epilog_has_alu, bool preamble_newly_enabled)
 {
+   const bool agx3_opt = g17p || (m5 && !g18_scans);
    nir_opt_peephole_select_options peephole_select_options = {
       .limit = 64,
       .expensive_alu_ok = true,
-      .expensive_limit = g17p ? AGX_G17P_EXPENSIVE_FLATTEN_LIMIT : 0,
+      .expensive_limit = agx3_opt ? AGX_G17P_EXPENSIVE_FLATTEN_LIMIT : 0,
    };
    bool progress = false;
 
@@ -10535,7 +10537,7 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
    /* This runs only once up front since other optimizations don't affect it */
    NIR_PASS(_, nir, nir_opt_shrink_stores, true);
 
-   agx_optimize_loop_nir(nir, m5, g17p);
+   agx_optimize_loop_nir(nir, m5, agx3_opt);
 
    /* Loops are unrolled now: a subgroup XOR shuffle whose mask is still not
     * a constant takes the general lowering (agx_nir_lower_subgroups.c).
@@ -10544,7 +10546,7 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
       bool lowered = false;
       NIR_PASS(lowered, nir, agx_nir_lower_dynamic_shuffle_xor);
       if (lowered)
-         agx_optimize_loop_nir(nir, m5, g17p);
+         agx_optimize_loop_nir(nir, m5, agx3_opt);
    }
 
    /* If soft fault is enabled, we can freely speculate everything. That lets us
@@ -10946,12 +10948,12 @@ pre_preamble:
       move_all &= ~(nir_move_load_input | nir_move_load_frag_coord |
                     nir_move_alu);
 
-   /* Sinking a G17P buffer load into the arm that reads it saves the load when
+   /* Sinking a buffer load into the arm that reads it saves the load when
     * the arm is skipped. Sink leaves it at the top of that block; moving it on
     * to its use would make each load wait alone instead of overlapping.
     */
    NIR_PASS(_, nir, nir_opt_sink,
-            g17p ? move_all : move_all & ~nir_move_load_ssbo);
+            agx3_opt ? move_all : move_all & ~nir_move_load_ssbo);
    NIR_PASS(_, nir, nir_opt_move, move_all & ~nir_move_load_ssbo);
    NIR_PASS(progress, nir, nir_lower_all_phis_to_scalar);
 
@@ -14249,10 +14251,10 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p, bool native_fragment_dep
       }
       NIR_PASS(_, nir, nir_lower_frexp);
    }
-   /* Before nir_lower_alu's generic lower_fminmax_signed_zero. Validated on
-    * G17P only (`g17p` above means any native AGX3 chip); other chips keep
-    * the generic lowering. The flush policy is agx_nir_lower_fminmax's. */
-   if (chip_g17p) {
+   /* Before nir_lower_alu's generic lower_fminmax_signed_zero. Enabled for
+    * G17P and M5 (AGX3C); other chips keep the generic lowering. The flush
+    * policy is agx_nir_lower_fminmax's. */
+   if (chip_g17p || m5) {
       /* DXVK and vkd3d-proton mark every float op signed-zero preserving.
        * Drop the flag where no use can tell -0 from +0, before the min/max
        * lowering pays for it. */
@@ -14289,7 +14291,7 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p, bool native_fragment_dep
        * will run through the loop later, once we have the shader key, but if we
        * run now, that run will ideally be almost a no-op.
        */
-      agx_optimize_loop_nir(nir, !g17p && native_fragment_depth, g17p);
+      agx_optimize_loop_nir(nir, !g17p && native_fragment_depth, g17p || m5);
    } else {
       NIR_PASS(_, nir, nir_opt_copy_prop);
       NIR_PASS(_, nir, nir_opt_constant_folding);
@@ -16699,11 +16701,14 @@ agx_compile_shader_nir_internal(nir_shader *nir, struct agx_shader_key *key,
       NIR_PASS(_, nir, nir_opt_dce);
       /* The launch's copies, if any, sit above every export. */
       unsigned push_count = info->push_count;
+      const bool place_load_bases_low =
+         is_g17p ||
+         (key->dev.encoding == AGX_ISA_ENCODING_AGX3C && !key->dev.emit_agx3d);
       NIR_PASS(_, nir, agx_nir_place_preamble_handles_low,
                key->reserved_preamble,
                info->agx3_uniform_dma_count ? info->agx3_uniform_dma[0].dest
                                             : push_count,
-               &push_count, is_g17p);
+               &push_count, place_load_bases_low);
       info->push_count = push_count;
    }
 
