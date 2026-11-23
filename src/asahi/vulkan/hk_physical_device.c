@@ -279,9 +279,9 @@ hk_get_device_extensions(const struct agx_device *dev,
       .KHR_zero_initialize_workgroup_memory = true,
       .EXT_4444_formats = true,
       .EXT_attachment_feedback_loop_layout = true,
-      /* Qualified on G17P; the draw-time selection is shared with M5. */
+      /* Draw-time selection is shared across G17P and M5. */
       .EXT_attachment_feedback_loop_dynamic_state =
-         dev->chip == AGX_CHIP_G17P,
+         agx_chip_g17p_or_m5(dev->chip),
       .EXT_blend_operation_advanced = true,
       .EXT_border_color_swizzle = true,
       .EXT_buffer_device_address = true,
