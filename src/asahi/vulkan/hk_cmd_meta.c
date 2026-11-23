@@ -2192,7 +2192,7 @@ hk_g17p_compute_blit_supported(const struct hk_device *dev,
                                const struct hk_image *dst,
                                const VkBlitImageInfo2 *info)
 {
-   if (!agx_chip_native_agx3(dev->dev.chip) || info->regionCount == 0)
+   if (!agx_chip_native_or_m5(dev->dev.chip) || info->regionCount == 0)
       return false;
 
    for (uint32_t r = 0; r < info->regionCount; ++r) {
