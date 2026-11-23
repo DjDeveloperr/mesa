@@ -10726,6 +10726,22 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
       nir, nir_reassociate_scalar_math | nir_reassociate_cse_heuristic |
               (m5 ? nir_reassociate_loop_invariant : 0));
 
+   /* Split loop-invariant additive address chains and factor loop-invariant
+    * and linear-IV integer MAC reductions after reassociation (so
+    * reassociation cannot pull hoisted loop-invariant sums back into inner
+    * loops) and before preamble formation. */
+   {
+      bool factored = false;
+      NIR_PASS(factored, nir, agx_nir_opt_factor_loop_mac);
+      if (factored) {
+         NIR_PASS(_, nir, nir_opt_algebraic);
+         NIR_PASS(_, nir, nir_opt_constant_folding);
+         NIR_PASS(_, nir, nir_opt_cse);
+         NIR_PASS(_, nir, nir_opt_dce);
+         nir_divergence_analysis(nir);
+      }
+   }
+
    /* Lower fmin/fmax before optimizing preambles so we can see across uniform
     * expressions. Do it after nir_opt_reassociate because nir_opt_reassociate
     * should work on unlowered fmin/fmax.
