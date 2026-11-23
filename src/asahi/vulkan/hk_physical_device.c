@@ -1526,7 +1526,7 @@ hk_get_device_properties(const struct agx_device *dev,
       .shaderSignedZeroInfNanPreserveFloat64 = false,
       .shaderDenormPreserveFloat16 = true,
       /* agx_nir_lower_denorm_preserve() computes flushed cases exactly. */
-      .shaderDenormPreserveFloat32 = dev->chip == AGX_CHIP_G17P,
+      .shaderDenormPreserveFloat32 = agx_chip_native_or_m5(dev->chip),
       .shaderDenormPreserveFloat64 = false,
       .shaderDenormFlushToZeroFloat16 = false,
       .shaderDenormFlushToZeroFloat32 = true,
