@@ -325,6 +325,29 @@ reuse_correctness(struct fixture *f)
    CHECK(cmd->state.upload_stats.draw_param_uploads == 1);
    CHECK(cmd->state.upload_stats.constant_uploads == 1);
 
+   /* M5 shares host-side immutable constant, draw-parameter and draw-ID reuse
+    * without touching uncached root-descriptor memory. */
+   reset(f);
+   f->dev.dev.chip = AGX_CHIP_G17S;
+   hk_cmd_upload_draw_params(cmd, 7, 3);
+   const uint64_t m5_params = cmd->state.gfx.draw_params;
+   hk_cmd_upload_draw_params(cmd, 7, 3);
+   CHECK(cmd->state.gfx.draw_params == m5_params);
+   CHECK(cmd->state.upload_stats.draw_param_uploads == 1);
+   CHECK(cmd->state.upload_stats.draw_param_reuses == 1);
+   hk_cmd_upload_draw_id(cmd, 42);
+   const uint64_t m5_id = cmd->state.gfx.draw_id_ptr;
+   hk_cmd_upload_draw_id(cmd, 42);
+   CHECK(cmd->state.gfx.draw_id_ptr == m5_id);
+   CHECK(cmd->state.upload_stats.draw_id_uploads == 1);
+   CHECK(cmd->state.upload_stats.draw_id_reuses == 1);
+   const uint64_t m5_const =
+      hk_cmd_upload_constants(cmd, &f->vs, MESA_SHADER_VERTEX);
+   CHECK(hk_cmd_upload_constants(cmd, &f->vs, MESA_SHADER_VERTEX) == m5_const);
+   CHECK(cmd->state.upload_stats.constant_uploads == 1);
+   CHECK(cmd->state.upload_stats.constant_reuses == 1);
+   f->dev.dev.chip = AGX_CHIP_G17P;
+
    const VkDispatchIndirectCommand gc_a = {32, 4, 1};
    const VkDispatchIndirectCommand gc_b = {64, 1, 1};
    const uint64_t gc_addr_a = hk_cmd_upload_group_count(cmd, gc_a);
