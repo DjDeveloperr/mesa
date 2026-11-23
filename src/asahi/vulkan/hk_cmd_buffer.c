@@ -522,6 +522,7 @@ hk_CmdExecuteCommands(VkCommandBuffer commandBuffer,
       cmd->state.conditional;
 
    hk_flush_deferred_clears(cmd);
+   hk_copy_forward_invalidate_all(&cmd->state.copy_forward);
 
    /* Secondary command buffers are materialized by replaying their common
     * command queues into the primary.  Their last bound state is therefore
@@ -1051,6 +1052,7 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
           "must end rendering before ending the command buffer");
 
    perf_debug(cmd, "End command buffer");
+   hk_copy_forward_invalidate_all(&cmd->state.copy_forward);
    hk_flush_deferred_clears(cmd);
    hk_sync_flush_pending_timestamp(cmd);
    hk_cmd_buffer_end_compute(cmd);

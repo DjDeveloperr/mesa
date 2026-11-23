@@ -5291,6 +5291,29 @@ hk_CmdCopyBuffer2(VkCommandBuffer commandBuffer, const VkCopyBufferInfo2 *info)
 
    /* Transfer stage: the streams recorded here belong to the transfer
     * class for every recorded dependency. */
+   if (cmd->state.copy_forward.active_count) {
+      VK_FROM_HANDLE(hk_buffer, src, info->srcBuffer);
+      VK_FROM_HANDLE(hk_buffer, dst, info->dstBuffer);
+      for (uint32_t r = 0; r < info->regionCount; ++r) {
+         const VkBufferCopy2 *region = &info->pRegions[r];
+         struct hk_copy_forward_range srange = {
+            .handle = 0,
+            .offset = 0,
+            .address = hk_buffer_address_ro(src, region->srcOffset),
+            .size = region->size,
+         };
+         struct hk_copy_forward_range drange = {
+            .handle = 0,
+            .offset = 0,
+            .address = hk_buffer_address_rw(dst, region->dstOffset),
+            .size = region->size,
+         };
+         hk_copy_forward_resolve_readonly_read(&cmd->state.copy_forward,
+                                               &srange, NULL);
+         hk_copy_forward_note_write(&cmd->state.copy_forward, &drange, true,
+                                    NULL, NULL);
+      }
+   }
    uint64_t lo = UINT64_MAX, hi = 0;
    for (uint32_t r = 0; r < info->regionCount; ++r) {
       lo = MIN2(lo, info->pRegions[r].dstOffset);

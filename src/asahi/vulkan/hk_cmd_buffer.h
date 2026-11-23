@@ -32,6 +32,7 @@
 
 #include "hk_private.h"
 #include "hk_barrier.h"
+#include "hk_copy_forward.h"
 #include "hk_conditional_render_core.h"
 #include "hk_shader.h"
 #include "hk_sync.h"
@@ -1792,6 +1793,9 @@ struct hk_cmd_buffer {
 
       /* Suppress consumption of pending resets while recording another reset. */
       bool query_reset_recording;
+
+      /* Dead-scratch buffer copy forwarding state within this primary CB. */
+      struct hk_copy_forward_state copy_forward;
 
       /* An event is set, reset or waited on: the host or another queue can
        * observe this recording before its submission completes. */

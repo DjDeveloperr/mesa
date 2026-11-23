@@ -37,6 +37,8 @@ hk_files = files(
   'hk_descriptor_table.h',
   'hk_compute_kick.c',
   'hk_compute_kick.h',
+  'hk_copy_forward.c',
+  'hk_copy_forward.h',
   'hk_device.c',
   'hk_device.h',
   'hk_device_memory.c',
@@ -1239,6 +1241,10 @@ if with_tests
   # latest point any reason asks for. Header only; no device.
   test('hk_own_wait', executable('hk_own_wait_test',
     files('tests/test-hk-own-wait.c'),
+    include_directories : [include_directories('.'), inc_include, inc_src]),
+    suite : ['asahi'])
+  test('hk_copy_forward', executable('hk_copy_forward_test',
+    files('hk_copy_forward.c', 'tests/test-hk-copy-forward.c'),
     include_directories : [include_directories('.'), inc_include, inc_src]),
     suite : ['asahi'])
   test('hk_errored_submit', executable('hk_errored_submit_test',
