@@ -16712,7 +16712,12 @@ agx_compile_shader_nir_internal(nir_shader *nir, struct agx_shader_key *key,
       assign_coefficient_regs(nir, &info->varyings.fs);
    }
 
-   if (key->dev.encoding == AGX_ISA_ENCODING_AGX3C) {
+   const bool agx3_compute =
+      (key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+       key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
+      !key->dev.emit_agx3d && mesa_shader_stage_is_compute(nir->info.stage);
+
+   if (key->dev.encoding == AGX_ISA_ENCODING_AGX3C || agx3_compute) {
       /* Hoist only what the register file can hold through the loop: the
        * file a workgroup allows (agx_ra), less what spilling reserves.
        */
@@ -16725,7 +16730,18 @@ agx_compile_shader_nir_internal(nir_shader *nir, struct agx_shader_key *key,
          regs = MIN2(regs, agx_max_registers_for_occupancy(threads));
       }
 
-      NIR_PASS(_, nir, agx_nir_opt_licm, regs - 8);
+      unsigned licm_budget = regs - 8;
+      bool licm_speculative = agx3_compute && !nir->info.internal;
+      if (agx3_compute) {
+         /* Cap compute LICM hoisted live-in demand at 64 half-registers
+          * (32 full GPRs) across both AGX3B and AGX3C so speculative and
+          * pure read-only loop load hoisting never pushes medium-pressure
+          * loops across the 64-GPR occupancy cliff. */
+         licm_budget = MIN2(licm_budget, 64);
+      }
+
+      NIR_PASS(_, nir, nir_opt_dead_cf);
+      NIR_PASS(_, nir, agx_nir_opt_licm, licm_budget, licm_speculative);
    }
 
    if (is_agx3) {
