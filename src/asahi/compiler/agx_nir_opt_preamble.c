@@ -366,51 +366,75 @@ collect_ifs(struct exec_list *list, struct util_dynarray *ifs)
  * nir_opt_peephole_select that runs after the constant program is formed,
  * has seen it. Found by forming an unweighted constant program on a clone and
  * flattening that, so the rule is the select pass's own. Without flatten,
- * every if is a branch. */
+ * every if is a branch.
+ *
+ * Returns NULL when no branch survives (so execution_weight() needs no hash
+ * lookups). When flatten ran nir_opt_preamble on the unweighted clone, its
+ * general uniform usage is returned through unweighted_used /
+ * have_unweighted_used so free_preamble_halves() does not repeat the same
+ * clone and pass when no branch survives. */
 static struct set *
 surviving_branches(nir_shader *nir, const nir_opt_preamble_options *options,
                    const unsigned *sizes,
-                   const nir_opt_peephole_select_options *flatten)
+                   const nir_opt_peephole_select_options *flatten,
+                   unsigned *unweighted_used, bool *have_unweighted_used)
 {
-   struct set *branches = _mesa_pointer_set_create(NULL);
-   struct util_dynarray ifs, clone_ifs, left;
-   util_dynarray_init(&ifs, NULL);
-   util_dynarray_init(&clone_ifs, NULL);
-   util_dynarray_init(&left, NULL);
-   collect_ifs(&nir_shader_get_entrypoint(nir)->body, &ifs);
+   *have_unweighted_used = false;
 
-   if (flatten && ifs.size) {
+   struct util_dynarray ifs;
+   util_dynarray_init(&ifs, NULL);
+   collect_ifs(&nir_shader_get_entrypoint(nir)->body, &ifs);
+   if (!ifs.size) {
+      util_dynarray_fini(&ifs);
+      return NULL;
+   }
+
+   struct set *branches = _mesa_pointer_set_create(NULL);
+
+   if (flatten) {
+      struct util_dynarray clone_ifs, left;
+      util_dynarray_init(&clone_ifs, NULL);
+      util_dynarray_init(&left, NULL);
+
       unsigned used[nir_preamble_num_classes];
       memcpy(used, sizes, sizeof(used));
 
       nir_shader *clone = nir_shader_clone(NULL, nir);
       collect_ifs(&nir_shader_get_entrypoint(clone)->body, &clone_ifs);
       nir_opt_preamble(clone, options, used);
+      *unweighted_used = used[nir_preamble_class_general];
+      *have_unweighted_used = true;
       nir_opt_peephole_select(clone, flatten);
       collect_ifs(&nir_shader_get_entrypoint(clone)->body, &left);
 
       /* Both walks see the same ifs in the same order, and the select pass
        * creates no ifs. */
-      struct set *standing = _mesa_pointer_set_create(NULL);
-      util_dynarray_foreach(&left, nir_if *, nif)
-         _mesa_set_add(standing, *nif);
-      for (unsigned i = 0; i < util_dynarray_num_elements(&ifs, nir_if *);
-           ++i) {
-         if (_mesa_set_search(standing, *util_dynarray_element(
-                                           &clone_ifs, nir_if *, i)))
-            _mesa_set_add(branches,
-                          *util_dynarray_element(&ifs, nir_if *, i));
+      if (left.size) {
+         struct set *standing = _mesa_pointer_set_create(NULL);
+         util_dynarray_foreach(&left, nir_if *, nif)
+            _mesa_set_add(standing, *nif);
+         for (unsigned i = 0; i < util_dynarray_num_elements(&ifs, nir_if *);
+              ++i) {
+            if (_mesa_set_search(standing, *util_dynarray_element(
+                                              &clone_ifs, nir_if *, i)))
+               _mesa_set_add(branches,
+                             *util_dynarray_element(&ifs, nir_if *, i));
+         }
+         _mesa_set_destroy(standing, NULL);
       }
-      _mesa_set_destroy(standing, NULL);
       ralloc_free(clone);
+      util_dynarray_fini(&clone_ifs);
+      util_dynarray_fini(&left);
    } else {
       util_dynarray_foreach(&ifs, nir_if *, nif)
          _mesa_set_add(branches, *nif);
    }
 
    util_dynarray_fini(&ifs);
-   util_dynarray_fini(&clone_ifs);
-   util_dynarray_fini(&left);
+   if (!branches->entries) {
+      _mesa_set_destroy(branches, NULL);
+      return NULL;
+   }
    return branches;
 }
 
@@ -940,6 +964,25 @@ allow_speculative_load(nir_builder *b, nir_intrinsic_instr *load, void *data)
    return true;
 }
 
+static bool
+has_speculative_candidate(const nir_shader *nir)
+{
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         if (block->cf_node.parent->type == nir_cf_node_function)
+            continue;
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            unsigned end;
+            if (speculative_descriptor(nir_instr_as_intrinsic(instr), &end))
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
 static unsigned
 free_preamble_halves(const nir_shader *nir,
                      const nir_opt_preamble_options *options,
@@ -1047,15 +1090,28 @@ agx_nir_opt_preamble(nir_shader *nir, unsigned *sizes, bool g17p,
    }
    /* Every AGX3B chip: the uniform file it fills is the encoding's. */
    struct set *branches = NULL;
+   unsigned unweighted_used = 0;
+   bool have_unweighted_used = false;
    if (g17p && !agx3c) {
-      branches = surviving_branches(nir, &options, sizes, flatten);
+      branches = surviving_branches(nir, &options, sizes, flatten,
+                                    &unweighted_used, &have_unweighted_used);
       options.cb_data = branches;
    }
    bool speculative = false;
-   if (g17p && !agx3c && nir->info.stage == MESA_SHADER_FRAGMENT) {
-      unsigned free_halves = free_preamble_halves(nir, &options, sizes);
-      NIR_PASS(speculative, nir, nir_shader_intrinsics_pass,
-               allow_speculative_load, nir_metadata_all, &free_halves);
+   if (g17p && !agx3c && nir->info.stage == MESA_SHADER_FRAGMENT &&
+       has_speculative_candidate(nir)) {
+      unsigned free_halves;
+      if (!branches && have_unweighted_used) {
+         const unsigned total =
+            options.preamble_storage_size[nir_preamble_class_general];
+         free_halves = unweighted_used < total ? total - unweighted_used : 0;
+      } else {
+         free_halves = free_preamble_halves(nir, &options, sizes);
+      }
+      if (free_halves > 0) {
+         NIR_PASS(speculative, nir, nir_shader_intrinsics_pass,
+                  allow_speculative_load, nir_metadata_all, &free_halves);
+      }
    }
 
    NIR_PASS(progress, nir, nir_opt_preamble, &options, sizes);

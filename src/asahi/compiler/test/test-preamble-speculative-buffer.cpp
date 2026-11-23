@@ -21,8 +21,10 @@ struct speculative_result {
 
 /* A constant read of a uniform buffer under a non-uniform if. */
 static speculative_result
-run_speculative(gl_access_qualifier desc_access, unsigned index,
-                unsigned used_halves)
+run_speculative_opts(gl_access_qualifier desc_access, unsigned index,
+                     unsigned used_halves,
+                     const nir_opt_peephole_select_options *flatten,
+                     bool in_loop)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_FRAGMENT, &agx_nir_options, "speculative buffer read");
@@ -35,19 +37,32 @@ run_speculative(gl_access_qualifier desc_access, unsigned index,
                                           nir_channel(&b, desc, 1));
 
    nir_def *elsewhere = nir_imm_vec4(&b, 0, 0, 0, 0);
-   nir_push_if(&b, nir_ine_imm(&b, nir_load_sample_id(&b), 0));
-   nir_def *read = nir_load_constant_agx(
-      &b, 4, 32, addr, nir_imm_int(&b, index), .access = BUFFER_READ,
-      .base = 2, .format = PIPE_FORMAT_R32_UINT);
-   nir_pop_if(&b, NULL);
-   agx_test_store_output(&b, nir_if_phi(&b, read, elsewhere), zero,
-                         nir_type_float32, FRAG_RESULT_DATA0);
+   nir_def *out;
+   if (in_loop) {
+      nir_loop *loop = nir_push_loop(&b);
+      nir_def *read = nir_load_constant_agx(
+         &b, 4, 32, addr, nir_imm_int(&b, index), .access = BUFFER_READ,
+         .base = 2, .format = PIPE_FORMAT_R32_UINT);
+      agx_test_store_output(&b, read, zero, nir_type_float32, FRAG_RESULT_DATA0);
+      nir_jump(&b, nir_jump_break);
+      nir_pop_loop(&b, loop);
+      out = NULL;
+   } else {
+      nir_push_if(&b, nir_ine_imm(&b, nir_load_sample_id(&b), 0));
+      nir_def *read = nir_load_constant_agx(
+         &b, 4, 32, addr, nir_imm_int(&b, index), .access = BUFFER_READ,
+         .base = 2, .format = PIPE_FORMAT_R32_UINT);
+      nir_pop_if(&b, NULL);
+      out = nir_if_phi(&b, read, elsewhere);
+   }
+   if (out)
+      agx_test_store_output(&b, out, zero, nir_type_float32, FRAG_RESULT_DATA0);
 
    NIR_PASS(_, b.shader, nir_opt_copy_prop);
    NIR_PASS(_, b.shader, nir_opt_dce);
    nir_validate_shader(b.shader, "before preamble");
    unsigned sizes[] = {used_halves, 0, 0};
-   agx_nir_opt_preamble(b.shader, sizes, true, false, NULL);
+   agx_nir_opt_preamble(b.shader, sizes, true, false, flatten);
    nir_validate_shader(b.shader, "after preamble");
 
    speculative_result r = {};
@@ -83,8 +98,20 @@ run_speculative(gl_access_qualifier desc_access, unsigned index,
    return r;
 }
 
+static speculative_result
+run_speculative(gl_access_qualifier desc_access, unsigned index,
+                unsigned used_halves)
+{
+   return run_speculative_opts(desc_access, index, used_halves, NULL, false);
+}
+
 #define VALID_DESCRIPTOR \
    ((gl_access_qualifier)(ACCESS_CAN_SPECULATE | ACCESS_BUFFER_DESCRIPTOR_AGX))
+
+static const nir_opt_peephole_select_options flatten = {
+   .limit = 64,
+   .expensive_alu_ok = true,
+};
 
 TEST(PreambleSpeculativeBuffer, MovesGuardedByTheBoundSize)
 {
@@ -119,4 +146,36 @@ TEST(PreambleSpeculativeBuffer, StaysPastTheZeroPage)
    EXPECT_EQ(r.main_loads, 1u);
    EXPECT_EQ(r.guarded, 0u);
    EXPECT_FALSE(r.main_speculatable);
+}
+
+TEST(PreambleSpeculativeBuffer, ReusesUnweightedBudgetWhenIfFlattens)
+{
+   speculative_result r =
+      run_speculative_opts(VALID_DESCRIPTOR, 3, 4, &flatten, false);
+   EXPECT_EQ(r.main_loads, 0u);
+   EXPECT_EQ(r.preamble_loads, 1u);
+   EXPECT_EQ(r.guarded, 1u);
+   EXPECT_EQ(r.end, 64u);
+
+   speculative_result full =
+      run_speculative_opts(VALID_DESCRIPTOR, 3, 478, &flatten, false);
+   EXPECT_EQ(full.main_loads, 1u);
+   EXPECT_EQ(full.guarded, 0u);
+   EXPECT_FALSE(full.main_speculatable);
+}
+
+TEST(PreambleSpeculativeBuffer, LoopWithoutIfsStillComputesFreeBudget)
+{
+   speculative_result r =
+      run_speculative_opts(VALID_DESCRIPTOR, 3, 4, &flatten, true);
+   EXPECT_EQ(r.main_loads, 0u);
+   EXPECT_EQ(r.preamble_loads, 1u);
+   EXPECT_EQ(r.guarded, 1u);
+   EXPECT_EQ(r.end, 64u);
+
+   speculative_result full =
+      run_speculative_opts(VALID_DESCRIPTOR, 3, 478, &flatten, true);
+   EXPECT_EQ(full.main_loads, 1u);
+   EXPECT_EQ(full.guarded, 0u);
+   EXPECT_FALSE(full.main_speculatable);
 }
