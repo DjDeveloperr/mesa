@@ -130,6 +130,11 @@ agx_fence_create(struct agx_context *ctx)
    if (ctx->any_faults)
       return NULL;
 
+   /* Ensure ctx->syncobj reflects any queued work before snapshotting it. */
+   agx_submit_pending(ctx);
+   if (ctx->any_faults)
+      return NULL;
+
    /* Snapshot the last rendering out fence. We'd rather have another
     * syncobj instead of a sync file, but this is all we get.
     * (HandleToFD/FDToHandle just gives you another syncobj ID for the
@@ -210,6 +215,10 @@ agx_fence_server_sync(struct pipe_context *pctx, struct pipe_fence_handle *f,
    struct agx_context *ctx = agx_context(pctx);
    int fd = -1, ret;
    assert(!value);
+
+   /* Batches queued before this server wait must not depend on the incoming
+    * acquire fence (which may even depend on those earlier batches). */
+   agx_submit_pending(ctx);
 
    ret = drmSyncobjExportSyncFile(dev->fd, f->syncobj, &fd);
    if (ret || fd < 0) {
