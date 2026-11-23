@@ -14373,8 +14373,10 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p, bool native_fragment_dep
    }
 
    /* Lower idiv after an optimization loop so we can constant fold more before
-    * nir_opt_idiv_const.
+    * nir_opt_idiv_const. Strength-reduce signed div/mod with provably
+    * nonnegative operands first so nir_lower_idiv drops redundant sign fixups.
     */
+   NIR_PASS(_, nir, agx_nir_opt_nonneg_idiv);
    NIR_PASS(_, nir, nir_opt_idiv_const, 16);
 
    nir_lower_idiv_options idiv_options = {
