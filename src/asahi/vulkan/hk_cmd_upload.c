@@ -11,7 +11,7 @@ hk_pool_root_alloc(struct hk_cmd_buffer *cmd, uint32_t size,
                    uint32_t alignment)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   if (!agx_chip_native_agx3(dev->dev.chip))
+   if (!agx_chip_native_or_m5(dev->dev.chip))
       return hk_pool_alloc(cmd, size, alignment);
 
    return hk_pool_alloc_from(cmd, &cmd->uploader.root, size, alignment,
@@ -55,7 +55,7 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
    const size_t tail_B = hk_root_descriptor_offset(set_dynamic_buffer_start);
    /* CPU-decoded descriptor programs use a new root identity to invalidate
     * their native program caches, even when only set memory changed. */
-   if (agx_chip_native_agx3(dev->dev.chip) && desc->uploaded_root.gpu &&
+   if (agx_chip_native_or_m5(dev->dev.chip) && desc->uploaded_root.gpu &&
        desc->uploaded_root_size == root_size &&
        desc->generation == desc->uploaded_root_generation &&
        desc->dynamic_buffer_end == desc->uploaded_dynamic_buffer_end) {
@@ -68,8 +68,15 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
              cmd->state.gfx.root &&
              desc->uploaded_root.gpu != cmd->state.gfx.root)
             cmd->state.gfx.g17p_bind_tail.valid = false;
-         if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS)
+         if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
             cmd->state.gfx.root_cpu = desc->uploaded_root.cpu;
+            if (agx_chip_g17_m5(dev->dev.chip) &&
+                cmd->state.gfx.root_fragment_snapshot_cpu !=
+                   desc->uploaded_root.cpu) {
+               hk_root_fragment_snapshot_publish(&cmd->state.gfx,
+                                                 desc->uploaded_root.cpu, root);
+            }
+         }
          hk_upload_stat(cmd, root_reuses, 1);
          return desc->uploaded_root.gpu;
       }
@@ -101,10 +108,10 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
       memcpy((uint8_t *)root_ptr.cpu + tail_B, (const uint8_t *)root + tail_B,
              root_size - tail_B);
 
-   /* Cached G17P roots need explicit CPU-to-GPU publication. Clean just this
+   /* Cached root BOs need explicit CPU-to-GPU publication. Clean just this
     * table now; vkEndCommandBuffer completes all recorded root cleans with a
     * single fence before submission can consume them. */
-   if (agx_chip_native_agx3(dev->dev.chip) && util_has_cache_ops()) {
+   if (agx_chip_native_or_m5(dev->dev.chip) && util_has_cache_ops()) {
       util_flush_range_no_fence(root_ptr.cpu, head_B);
       if (tail_B < root_size)
          util_flush_range_no_fence((uint8_t *)root_ptr.cpu + tail_B,
