@@ -14442,7 +14442,13 @@ agx_compile_function_nir_attempt(nir_shader *nir, nir_function_impl *impl,
 
    if (likely(!(agx_compiler_debug & AGX_DBG_NOSCHED))) {
       AGX_PASS(ctx, agx_pressure_schedule);
-      AGX_PASS(ctx, agx_ilp_schedule);
+      /* AGX2 runs the ILP schedule on compute shaders only. On G13 and G14
+       * its fragment sample batching breaks the gpubench-gl render.postfx
+       * bloom output, so AGX2 graphics shaders keep the pressure order.
+       */
+      if (agx_isa_is_agx3(ctx->key->dev.encoding) ||
+          mesa_shader_stage_is_compute(ctx->stage))
+         AGX_PASS(ctx, agx_ilp_schedule);
    }
 
    AGX_PASS(ctx, agx3_order_fragment_device_loads);
