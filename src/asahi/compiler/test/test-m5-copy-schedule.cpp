@@ -684,8 +684,10 @@ TEST(M5CopySchedule, AGX3BFragmentSamplesUseOccupancySlack)
 }
 
 /* AGX3B fragment shaders recognize relocatable AGX_OPCODE_IMAGE_LOAD (2D and
- * immediate-LOD 2D_ARRAY) as native SMP samples and hoist them within the
- * occupancy step. */
+ * immediate-LOD 2D_ARRAY) as native SMP samples and hoist them. The light
+ * sample block takes the 48-half low-pressure budget, where each 3-word
+ * 2D_ARRAY coordinate costs an aligned 8 halves: four loads fit ahead of the
+ * first consumer and the fifth issues once the first result drains. */
 TEST(M5CopySchedule, AGX3BFragmentImageLoadsHoist)
 {
    EXPECT_EQ(emit_frag_samples_and_count(
@@ -697,7 +699,7 @@ TEST(M5CopySchedule, AGX3BFragmentImageLoadsHoist)
                 AGX_ISA_ENCODING_AGX3B, AGX_CHIP_G16G, AGX_DIM_2D_ARRAY,
                 FRAG_SAMPLE_IMAGE_LOAD, FRAG_DESC_REG, AGX_LOD_MODE_AUTO_LOD,
                 false, false, 0),
-             5u);
+             4u);
 }
 
 /* Non-relocatable AGX3B fragment samples stay pinned to staging bank 0 in

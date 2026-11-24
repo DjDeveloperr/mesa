@@ -87,7 +87,7 @@ emit_multi_tap(frag_shader *s, unsigned n, unsigned channels, unsigned live,
          b, dest, coords, agx_immediate(0), agx_immediate(0), agx_immediate(0),
          agx_immediate(0), agx_null(),
          coord_comps == 3 ? AGX_DIM_2D_ARRAY : AGX_DIM_2D,
-         AGX_LOD_MODE_AUTO_LOD, BITFIELD_MASK(channels), is_shadow, false,
+         AGX_LOD_MODE_AUTO_LOD, BITFIELD_MASK(channels), false, is_shadow,
          false, AGX_GATHER_NONE, false);
       if (is_load)
          tex->op = AGX_OPCODE_TEXTURE_LOAD;
@@ -236,13 +236,16 @@ TEST(AGX3BFragmentSampleSchedule, ThreeTapSamplesStayInPressureOrder)
    ralloc_free(s.mem);
 }
 
-TEST(AGX3BFragmentSampleSchedule, HighPressureBlockRetainsFixedSlackCap)
+/* 26 values held across the taps put the block past the low-pressure budget:
+ * the 48-half cap would refuse every hoist, while the program's occupancy cap
+ * lets all five samples issue ahead of their consumers. */
+TEST(AGX3BFragmentSampleSchedule, HighPressureBlockTakesOccupancySlack)
 {
    frag_shader s;
    frag_shader_init(&s, false);
    emit_multi_tap(&s, 5, 3, 26, false);
    agx_ilp_schedule(s.b->shader);
-   EXPECT_EQ(samples_before_first_consumer(s.body, s.b->shader->alloc), 1u);
+   EXPECT_EQ(samples_before_first_consumer(s.body, s.b->shader->alloc), 5u);
    ralloc_free(s.mem);
 }
 

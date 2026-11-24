@@ -684,14 +684,12 @@ agx_pressure_schedule(agx_context *ctx)
  * forward cap on the halves its own definitions hold. */
 #define AGX_ILP_FS_SAMPLE_SLACK 16
 #define AGX_ILP_FS_SAMPLE_HALVES 88
-/* Measured AGX3B Dynamic Caching tuning cap (halves) for low-pressure
- * multi-tap fragment sample hoisting. AGX3B has no static register-file split
- * (register storage shares on-chip SRAM with L1 cache); sweeping 48/64/88
- * halves on G17P render.postfx, render.shadow, render.deferred and a
- * 10,982-shader corpus selected 48 halves: it preserves the full render.postfx
- * gain (5-tap bloom downsample at 39 GPRs) while keeping 9-tap shadow PCF at
- * 63 GPRs (0% regression vs +3.7-4.1% slower at 64/88) and avoiding d16
- * high-register packer refusals observed at 88 halves. */
+/* Forward cap (halves) for a low-pressure AGX3B multi-tap fragment block.
+ * Measured on G17P: sweeping 48/64/88 halves on render.postfx, render.shadow,
+ * render.deferred and a 10,982-shader corpus selected 48. It keeps the 5-tap
+ * bloom downsample at 39 GPRs with every tap in flight, keeps 9-tap shadow
+ * PCF at 63 GPRs (3.7-4.1% slower at 64/88 halves) and avoids the d16
+ * high-register packer refusals seen at 88 halves. */
 #define AGX_ILP_AGX3B_FS_SAMPLE_HALVES 48
 /* Samples a fragment block may issue ahead of the first unissued one. */
 #define AGX_ILP_FS_HOIST_SAMPLES 6
@@ -1940,37 +1938,6 @@ agx_ilp_agx3b_fragment_cap(agx_context *ctx, uint8_t **size16_out, void *memctx)
           AGX_ILP_M5_OCCUPANCY_MARGIN;
 }
 
-/* Measured AGX3B per-block fragment sample hoisting budget (tuned on G17P).
- * Keeping low-pressure multi-tap blocks inside AGX_ILP_AGX3B_FS_SAMPLE_HALVES
- * (48 halves, using aligned RA vector widths and keeping sample destination
- * slots charged across split until their last live channel dies) lets 5-tap
- * bloom downsamples hoist all taps in flight without regressing 9-tap PCF
- * (measured on G17P: 9-tap shadow PCF at g79/g95 with 64/88-half caps is
- * 3.7-4.1% slower than at g63 with a 48-half cap). Blocks with peak >= 32
- * halves keep AGX_ILP_FS_SAMPLE_SLACK. */
-static bool
-ilp_agx3b_fragment_sample_budget(agx_context *ctx, agx_block *block,
-                                 uint8_t **size16_out, void *memctx,
-                                 signed *slack_out, signed *fwd_cap_out)
-{
-   if (!*size16_out) {
-      *size16_out = rzalloc_array(memctx, uint8_t, MAX2(ctx->alloc, 1));
-      if (!*size16_out)
-         return false;
-      agx_foreach_instr_global(ctx, I) {
-         agx_foreach_ssa_dest(I, d)
-            (*size16_out)[I->dest[d].value] = agx_index_size_16(I->dest[d]);
-      }
-   }
-   const signed peak = ilp_block_peak(ctx, block, *size16_out, memctx);
-   if (peak + AGX_ILP_FS_SAMPLE_SLACK < AGX_ILP_AGX3B_FS_SAMPLE_HALVES) {
-      *slack_out = AGX_ILP_AGX3B_FS_SAMPLE_HALVES - peak;
-      *fwd_cap_out = AGX_ILP_AGX3B_FS_SAMPLE_HALVES;
-      return true;
-   }
-   return false;
-}
-
 void
 agx_ilp_schedule(agx_context *ctx)
 {
@@ -2250,20 +2217,23 @@ agx_ilp_schedule(agx_context *ctx)
             const signed peak = ilp_block_peak(ctx, block, size16, memctx);
             slack = MAX2(slack, m5_occupancy_cap - peak);
          } else if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
-            /* Low-pressure multi-tap blocks keep the measured AGX3B budget
-             * (ilp_agx3b_fragment_sample_budget()); others take the
-             * occupancy-capped slack. */
-            ra_sample_cost = ilp_agx3b_fragment_sample_budget(
-               ctx, block, &size16, memctx, &slack, &fwd_cap);
-            if (!ra_sample_cost) {
-               if (!agx3b_frag_cap_ready) {
-                  agx3b_frag_cap =
-                     agx_ilp_agx3b_fragment_cap(ctx, &size16, memctx);
-                  agx3b_frag_cap_ready = true;
-               }
-               if (size16) {
-                  const signed peak =
-                     ilp_block_peak(ctx, block, size16, memctx);
+            if (!agx3b_frag_cap_ready) {
+               agx3b_frag_cap =
+                  agx_ilp_agx3b_fragment_cap(ctx, &size16, memctx);
+               agx3b_frag_cap_ready = true;
+            }
+            /* A program past its occupancy ceiling keeps the fixed slack.
+             * Inside it, a low-pressure block takes the measured
+             * AGX_ILP_AGX3B_FS_SAMPLE_HALVES budget with aligned RA costs,
+             * and any other block grows up to the program's occupancy cap. */
+            if (size16 && agx3b_frag_cap > 0) {
+               const signed peak = ilp_block_peak(ctx, block, size16, memctx);
+               if (peak + AGX_ILP_FS_SAMPLE_SLACK <
+                   AGX_ILP_AGX3B_FS_SAMPLE_HALVES) {
+                  slack = AGX_ILP_AGX3B_FS_SAMPLE_HALVES - peak;
+                  fwd_cap = AGX_ILP_AGX3B_FS_SAMPLE_HALVES;
+                  ra_sample_cost = true;
+               } else {
                   slack = MAX2(slack, agx3b_frag_cap - peak);
                }
             }
