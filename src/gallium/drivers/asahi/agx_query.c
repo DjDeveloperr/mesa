@@ -569,6 +569,7 @@ agx_add_query_to_batch(struct agx_batch *batch, struct agx_query *query)
    struct agx_bo *bo = is_occlusion(query) ? batch->ctx->oq->bo : query->bo;
 
    agx_batch_add_bo(batch, bo);
+   batch->barrier_untracked = true;
    query->writer_generation[idx] = batch->ctx->batches.generation[idx];
 }
 

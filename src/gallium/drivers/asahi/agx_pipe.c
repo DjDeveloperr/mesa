@@ -1584,6 +1584,8 @@ agx_flush_resource(struct pipe_context *pctx, struct pipe_resource *pres)
    }
 
    agx_submit_pending(agx_context(pctx));
+   agx_context(pctx)->batches.barrier_seqnum =
+      agx_context(pctx)->batches.seqnum;
 }
 
 /* Native G18 ZLS arrays use either 16-KiB pages (bit 0) or 128-byte
