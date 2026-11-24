@@ -2759,10 +2759,22 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
     * This is correctness-critical for every default EGL surface: the DRI
     * pbuffer/window colour buffer is BGRA while GLES glReadPixels(GL_RGBA)
     * requests RGBA.  AGX2 retains its established accelerated path.
+    *
+    * The M5 profile renders every blit-transfer target through the paths its
+    * mapped transfers already take, since those blit each staged level of a
+    * tiled or compressed texture with u_blitter (agx_blit_from_staging,
+    * agx_blit_to_staging): u_blitter blits a layer at a time, a layered
+    * st/mesa PBO draw is split into layers (agx_swtnl_applies), the
+    * end-of-tile PBE stores sRGB as the linear format the shaders encoded,
+    * and a level of a mipmapped 2D texture is stored as a one-level image
+    * (agx_batch_upload_pbe_internal).  Let st/mesa upload from PBOs and
+    * convert formats on the GPU there instead of copying every texel
+    * through a CPU staging map.
     */
    caps->texture_transfer_modes =
-      agx_chip_command_stream_generation(agx_device(pscreen)->chip) ==
-            AGX_CS_GENERATION_AGX2
+      agx_chip_command_stream_generation(dev->chip) ==
+               AGX_CS_GENERATION_AGX2 ||
+            agx_chip_g17_m5(dev->chip)
          ? PIPE_TEXTURE_TRANSFER_BLIT
          : PIPE_TEXTURE_TRANSFER_DEFAULT;
 

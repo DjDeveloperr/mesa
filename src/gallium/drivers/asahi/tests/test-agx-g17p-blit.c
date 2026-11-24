@@ -2069,10 +2069,11 @@ main(void)
       agx_chip_command_stream_generation(dev->chip) == AGX_CS_GENERATION_AGX2;
    int status = 0;
 
-   /* AGX2 keeps blit-based texture transfers. Later generations use mapped
-    * transfers, which convert formats on the CPU. */
+   /* AGX2 and the M5 profile use blit-based texture transfers. Native AGX3
+    * uses mapped transfers, which convert formats on the CPU. */
    const unsigned want_transfer_modes =
-      agx2 ? PIPE_TEXTURE_TRANSFER_BLIT : PIPE_TEXTURE_TRANSFER_DEFAULT;
+      agx2 || agx_chip_g17_m5(dev->chip) ? PIPE_TEXTURE_TRANSFER_BLIT
+                                         : PIPE_TEXTURE_TRANSFER_DEFAULT;
    if (screen->caps.texture_transfer_modes != want_transfer_modes) {
       fprintf(stderr, "texture transfer modes %#x on %s, expected %#x\n",
               screen->caps.texture_transfer_modes, agx_chip_name(dev->chip),
