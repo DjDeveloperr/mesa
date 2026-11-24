@@ -590,6 +590,19 @@ agx_mip_filter_from_pipe(enum pipe_tex_mipfilter in)
    UNREACHABLE("Invalid mip filter");
 }
 
+/* Match Borealis native sampler packing: when mip selection is nearest and LOD is
+ * clamped strictly to 0 with zero bias, omit mip filtering in hardware. */
+static enum agx_mip_filter
+agx_mip_filter_from_sampler_state(const struct pipe_sampler_state *state)
+{
+   if (state->min_mip_filter == PIPE_TEX_MIPFILTER_NEAREST &&
+       state->min_lod == 0.0f && state->max_lod == 0.0f &&
+       state->lod_bias == 0.0f)
+      return AGX_MIP_FILTER_NONE;
+
+   return agx_mip_filter_from_pipe(state->min_mip_filter);
+}
+
 static const enum agx_compare_func agx_compare_funcs[PIPE_FUNC_ALWAYS + 1] = {
    [PIPE_FUNC_NEVER] = AGX_COMPARE_FUNC_NEVER,
    [PIPE_FUNC_LESS] = AGX_COMPARE_FUNC_LESS,
@@ -681,7 +694,7 @@ agx_create_sampler_state(struct pipe_context *pctx,
          util_next_power_of_two(MAX2(state->max_anisotropy, 1));
       cfg.magnify = agx_filters[state->mag_img_filter];
       cfg.minify = agx_filters[state->min_img_filter];
-      cfg.mip_filter = agx_mip_filter_from_pipe(state->min_mip_filter);
+      cfg.mip_filter = agx_mip_filter_from_sampler_state(state);
       cfg.wrap_s = agx_wrap_from_pipe(state->wrap_s);
       cfg.wrap_t = agx_wrap_from_pipe(state->wrap_t);
       cfg.wrap_r = agx_wrap_from_pipe(state->wrap_r);
@@ -2691,6 +2704,26 @@ agx_g17p_fs_cprog_qualified(const struct agx_shader_info *info)
            info->agx3_preamble_tps_inputs);
 }
 
+/* hk_agx3_compute_cprog_supported(): native AGX3 compute constant program
+ * launch contract (G16G / G17P). */
+static bool
+agx_g17p_cs_cprog_qualified(const struct agx_shader_info *info)
+{
+   return agx_g17p_fs_cprog_qualified(info) && info->agx3_staging_known &&
+          MAX2(info->scratch_size, info->agx3_spectpr_scratch_size) <=
+             AGX3_G17P_MAX_SPILL_B &&
+          info->local_size <= 32768 &&
+          info->preamble_scratch_size <= AGX3_G17P_MAX_SPILL_B &&
+          info->preamble_scratch_size >=
+             info->agx3_preamble_inputs.storage_bytes &&
+          info->texture_state_count == 0 && !info->uses_sampler_heap &&
+          info->sampler_state_count == 0 && !info->uses_ray_traversal &&
+          !info->uses_resource_info_query && !(info->preamble_offset & 1) &&
+          !(info->preamble_size & 1) &&
+          info->preamble_offset <= info->binary_size &&
+          info->preamble_size <= info->binary_size - info->preamble_offset;
+}
+
 /*
  * Compile a NIR shader. The only lowering left at this point is sysvals. The
  * shader key should have already been applied. agx_compile_variant may call
@@ -2889,23 +2922,41 @@ agx_compile_nir_tile(struct agx_device *dev, nir_shader *nir,
       }
    }
 
-   /* G17P fragment constant program, as hk_g17p_compile_fs_cprog(): a fragment
-    * that reads descriptor-backed memory compiles a clone with the native
-    * constant program and keeps it only when the native protocol can launch
-    * it; anything else compiles as before, without a preamble. */
-   bool fs_cprog_done = false;
-   if (agx_chip_native_preamble(dev->chip) && stage == MESA_SHADER_FRAGMENT &&
-       !secondary && !internal_kernel && key.no_preamble &&
-       (nir->info.num_ubos || nir->info.num_ssbos || nir->info.num_textures ||
-        nir->info.num_images)) {
+   /* G17P fragment and compute constant programs, mirroring Borealis: a
+    * shader that reads descriptor-backed memory compiles a clone with the
+    * native constant program and keeps it only when the native launch protocol
+    * admits it; anything else compiles as before, without a preamble. */
+   bool cprog_done = false;
+   const bool try_fs_cprog =
+      agx_chip_native_preamble(dev->chip) && stage == MESA_SHADER_FRAGMENT &&
+      !secondary && !internal_kernel && key.no_preamble &&
+      (nir->info.num_ubos || nir->info.num_ssbos || nir->info.num_textures ||
+       nir->info.num_images);
+   const bool try_cs_cprog =
+      agx_chip_native_agx3(dev->chip) && agx_chip_native_preamble(dev->chip) &&
+      stage == MESA_SHADER_COMPUTE && nir->info.stage == MESA_SHADER_COMPUTE &&
+      !secondary && !internal_kernel && key.no_preamble &&
+      (nir->info.num_ubos || nir->info.num_ssbos || nir->info.num_textures ||
+       nir->info.num_images);
+   if (try_fs_cprog || try_cs_cprog) {
       nir_shader *attempt = nir_shader_clone(NULL, nir);
       struct agx_shader_key ckey = key;
       ckey.no_preamble = false;
       ckey.g17p_native_uniforms = true;
+      if (try_cs_cprog)
+         ckey.agx3_native_cprog = true;
       if (attempt && agx_compile_shader_nir(attempt, &ckey, &compiled->b)) {
-         if (!compiled->b.info.has_preamble ||
-             agx_g17p_fs_cprog_qualified(&compiled->b.info)) {
-            fs_cprog_done = true;
+         const bool qualified =
+            !compiled->b.info.has_preamble ||
+            (try_fs_cprog
+                ? agx_g17p_fs_cprog_qualified(&compiled->b.info)
+                : (agx_g17p_cs_cprog_qualified(&compiled->b.info) &&
+                   (!compiled->b.info.agx3_preamble_tps_inputs ||
+                    compiled->push_range_count ||
+                    compiled->g17p_texture_resources ||
+                    compiled->b.info.rodata.size_16)));
+         if (qualified) {
+            cprog_done = true;
          } else {
             free(compiled->b.binary);
             memset(&compiled->b, 0, sizeof(compiled->b));
@@ -2916,7 +2967,7 @@ agx_compile_nir_tile(struct agx_device *dev, nir_shader *nir,
       ralloc_free(attempt);
    }
 
-   if (!fs_cprog_done && !agx_compile_shader_nir(nir, &key, &compiled->b)) {
+   if (!cprog_done && !agx_compile_shader_nir(nir, &key, &compiled->b)) {
       /* Fail closed and say so. agx_compile_shader_nir() zeroes its output on
        * refusal, so what comes back here is an empty shader part with no
        * binary and no BO. Record that on the variant: the draw and dispatch
@@ -5397,6 +5448,7 @@ agx_delete_compiled_shader(struct agx_device *dev,
       agx_delete_compiled_shader(dev, so->gs_copy);
 
    free(so->b.binary);
+   agx_bo_unreference(dev, so->agx3_compute_bo);
    agx_bo_unreference(dev, so->bo);
    FREE(so);
 }
@@ -6243,7 +6295,7 @@ agx_pack_g17_api_sampler(enum agx_chip chip, void *out,
             util_next_power_of_two(MAX2(state->max_anisotropy, 1));
          cfg.magnify = agx_filters[state->mag_img_filter];
          cfg.minify = agx_filters[state->min_img_filter];
-         cfg.mip_filter = agx_mip_filter_from_pipe(state->min_mip_filter);
+         cfg.mip_filter = agx_mip_filter_from_sampler_state(state);
          cfg.wrap_s = agx_wrap_from_pipe(state->wrap_s);
          cfg.wrap_t = agx_wrap_from_pipe(state->wrap_t);
          cfg.wrap_r = agx_wrap_from_pipe(state->wrap_r);
@@ -6272,7 +6324,7 @@ agx_pack_g17_api_sampler(enum agx_chip chip, void *out,
          util_next_power_of_two(MAX2(state->max_anisotropy, 1));
       cfg.magnify = agx_filters[state->mag_img_filter];
       cfg.minify = agx_filters[state->min_img_filter];
-      cfg.mip_filter = agx_mip_filter_from_pipe(state->min_mip_filter);
+      cfg.mip_filter = agx_mip_filter_from_sampler_state(state);
       cfg.wrap_s = agx_wrap_from_pipe(state->wrap_s);
       cfg.wrap_t = agx_wrap_from_pipe(state->wrap_t);
       cfg.wrap_r = agx_wrap_from_pipe(state->wrap_r);
@@ -6301,7 +6353,7 @@ agx_native_sampler_state(const struct pipe_sampler_state *state,
          util_next_power_of_two(MAX2(state->max_anisotropy, 1)),
       .magnify = agx_filters[state->mag_img_filter],
       .minify = agx_filters[state->min_img_filter],
-      .mip_filter = agx_mip_filter_from_pipe(state->min_mip_filter),
+      .mip_filter = agx_mip_filter_from_sampler_state(state),
       .wrap_s = agx_wrap_from_pipe(state->wrap_s),
       .wrap_t = agx_wrap_from_pipe(state->wrap_t),
       .wrap_r = agx_wrap_from_pipe(state->wrap_r),
@@ -6469,6 +6521,8 @@ agx_upload_samplers(struct agx_batch *batch, struct agx_compiled_shader *cs,
                continue;
             }
             agx_unpack(NULL, ordinary, SAMPLER_HAL200, cfg);
+            if (sampler)
+               cfg.mip_filter = agx_mip_filter_from_pipe(sampler->base.min_mip_filter);
             cfg.lod_bias = sampler ? CLAMP(sampler->base.lod_bias, -16.0, 16.0)
                                    : 0.0;
             AGX_SAMPLER_HAL200_pack((uint32_t *)query, &cfg);
@@ -7993,6 +8047,7 @@ agx_record_cdm_dispatch(struct agx_batch *batch, uint32_t start, uint32_t end,
  */
 static bool
 agx_g17p_append_compute(struct agx_batch *batch,
+                        struct agx_compiled_shader *cs,
                         const struct agx_shader_info *info,
                         const void *binary, struct agx_bo *constant_bo,
                         const struct agx_linked_shader *linked,
@@ -8262,6 +8317,10 @@ agx_g17p_append_compute(struct agx_batch *batch,
       !(info->main_offset % 0x80) &&
       info->rodata.offset + (uint64_t)info->rodata.size_16 * 2 <=
          info->main_offset;
+   const bool cs_cprog =
+      !linked && agx_chip_native_agx3(dev->chip) &&
+      agx_chip_native_preamble(dev->chip) && info && info->has_preamble &&
+      agx_g17p_cs_cprog_qualified(info);
    /* The thread-private frame SPECTPR declares: register spills, and the
     * 16-byte word a device atomic returns its old value through. Declaring
     * less than the code uses is not refused by anything; the dispatch just
@@ -8275,15 +8334,22 @@ agx_g17p_append_compute(struct agx_batch *batch,
        (indirect_local &&
         (!grid.ptr || grid.ptr >= (UINT64_C(1) << 48) || (grid.ptr & 3))) ||
        !info->main_size || !info->nr_gprs ||
-       info->has_preamble || info->preamble_scratch_size ||
+       ((info->has_preamble || info->preamble_scratch_size) && !cs_cprog) ||
        tps_size > AGX3_G17P_MAX_SPILL_B || (tps_size & 3) ||
        !info->agx3_staging_known ||
-       (info->main_offset != 0 && !rodata_prefix &&
+       (info->main_offset != 0 && !rodata_prefix && !cs_cprog &&
         info->main_offset != AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE) ||
        info->main_offset > info->binary_size ||
        info->main_size > info->binary_size - info->main_offset ||
        (range_count && !ranges) ||
        (!indirect_local && (!wg.x || !wg.y || !wg.z)) ||
+       (cs_cprog &&
+        (!constant_bo || !constant_bo->va || !constant_bo->va->addr ||
+         constant_bo->va->addr >= (UINT64_C(1) << 48) ||
+         (constant_bo->va->addr & 1) || info->binary_size > constant_bo->size ||
+         info->binary_size > (UINT64_C(1) << 48) - constant_bo->va->addr ||
+         !agx_bo_map(constant_bo) ||
+         (info->agx3_preamble_tps_inputs && !range_count))) ||
        (linked && (!linked->bo || !linked->bo->va || !linked->size ||
                    !linked->nr_gprs || !linked->g17p_compiler_d_valid))) {
       if (info) {
@@ -8322,27 +8388,62 @@ agx_g17p_append_compute(struct agx_batch *batch,
       if (!block_size || block_size > SIZE_MAX - AGX3_CONTAINER_LEAD_SIZE)
          return agx_g17p_compute_failed("code block size");
 
-      struct agx_ptr shader = agx_pool_alloc_aligned_with_bo(
-         &batch->pipeline_pool, AGX3_CONTAINER_LEAD_SIZE + block_size, 128,
-         &shader_bo);
-      if (!shader.cpu || !shader_bo)
-         return agx_g17p_compute_failed("shader allocation");
-
-      agx3_build_container_lead(shader.cpu, dev->chip,
-                                dev->params.num_cores_per_cluster);
+      const size_t container_size = AGX3_CONTAINER_LEAD_SIZE + block_size;
       const uint8_t *bytes = binary;
-      if (!agx3_build_code_block(
-             (uint8_t *)shader.cpu + AGX3_CONTAINER_LEAD_SIZE, block_size,
-             bytes + info->main_offset, info->main_size, info->main_size,
-             info->main_offset && !rodata_prefix ? bytes : NULL, false))
-         return agx_g17p_compute_failed("code block build");
-      shader_va =
-         shader.gpu + AGX3_CONTAINER_LEAD_SIZE + AGX3_CODE_BLOCK_ENTRY_OFFSET;
+      const uint8_t *container_cprog =
+         info->main_offset && !rodata_prefix && !cs_cprog ? bytes : NULL;
+
+      if (cs && !cs->agx3_compute_bo) {
+         struct agx_bo *bo = agx_bo_create(
+            dev, container_size, 0, AGX_BO_EXEC | AGX_BO_LOW_VA,
+            "Compute container");
+         uint8_t *map = bo && bo->va ? agx_bo_map(bo) : NULL;
+         if (map) {
+            agx3_build_container_lead(map, dev->chip,
+                                      dev->params.num_cores_per_cluster);
+            const uint64_t va = bo->va->addr + AGX3_CONTAINER_LEAD_SIZE +
+                                AGX3_CODE_BLOCK_ENTRY_OFFSET;
+            if (agx3_build_code_block(map + AGX3_CONTAINER_LEAD_SIZE,
+                                      block_size, bytes + info->main_offset,
+                                      info->main_size, info->main_size,
+                                      container_cprog, false) &&
+                agx_va_in_usc_window(dev, va)) {
+               agx_bo_assert_range(bo, 0, container_size);
+               cs->agx3_compute_bo = bo;
+               cs->agx3_compute_va = va;
+            } else {
+               agx_bo_unreference(dev, bo);
+            }
+         } else {
+            agx_bo_unreference(dev, bo);
+         }
+      }
+
+      if (cs && cs->agx3_compute_bo && cs->agx3_compute_va) {
+         shader_va = cs->agx3_compute_va;
+         agx_batch_add_bo(batch, cs->agx3_compute_bo);
+      } else {
+         struct agx_ptr shader = agx_pool_alloc_aligned_with_bo(
+            &batch->pipeline_pool, container_size, 128, &shader_bo);
+         if (!shader.cpu || !shader_bo)
+            return agx_g17p_compute_failed("shader allocation");
+
+         agx3_build_container_lead(shader.cpu, dev->chip,
+                                   dev->params.num_cores_per_cluster);
+         if (!agx3_build_code_block(
+                (uint8_t *)shader.cpu + AGX3_CONTAINER_LEAD_SIZE, block_size,
+                bytes + info->main_offset, info->main_size, info->main_size,
+                container_cprog, false))
+            return agx_g17p_compute_failed("code block build");
+         shader_va = shader.gpu + AGX3_CONTAINER_LEAD_SIZE +
+                     AGX3_CODE_BLOCK_ENTRY_OFFSET;
+         shader_sync_offset = shader.gpu - shader_bo->va->addr;
+         shader_sync_size = container_size;
+      }
+
       shader_binary_size = info->main_size;
       nr_gprs = info->nr_gprs;
       compiler_d = (uint32_t)info->agx3_staging_halfs * 2;
-      shader_sync_offset = shader.gpu - shader_bo->va->addr;
-      shader_sync_size = AGX3_CONTAINER_LEAD_SIZE + block_size;
    }
 
    struct agx_bo *program_bo = NULL;
@@ -8360,6 +8461,34 @@ agx_g17p_append_compute(struct agx_batch *batch,
           info->uses_ray_traversal, info->ray_traversal_depth_nonzero,
           &launch_sources))
       return agx_g17p_compute_failed("launch template");
+
+   struct agx_ioto_constant_program constant_program = {0};
+   const struct agx3_cprog_inputs *cprog_inputs = NULL;
+   if (cs_cprog) {
+      constant_program = (struct agx_ioto_constant_program){
+         .code = (const uint8_t *)agx_bo_map(constant_bo) +
+                 info->preamble_offset,
+         .code_size = info->preamble_size,
+         .code_va = constant_bo->va->addr + info->preamble_offset,
+         .force_external = true,
+         .absolute_branch = true,
+         .request_prelude = info->agx3_preamble_uniform_inputs,
+      };
+      if (info->agx3_preamble_tps_inputs)
+         cprog_inputs = &info->agx3_preamble_inputs;
+      const unsigned cprog_frame =
+         ALIGN_POT(MAX2((unsigned)info->agx3_preamble_inputs.storage_bytes,
+                        info->preamble_scratch_size),
+                   16);
+      launch_sources.ti_spill_bytes =
+         MAX2(launch_sources.ti_spill_bytes, cprog_frame);
+      launch_sources.ti_largest_ipr_bytes =
+         MAX2(launch_sources.ti_largest_ipr_bytes,
+              (uint32_t)info->agx3_preamble_staging_halfs * 2u);
+      nr_gprs = MAX2(nr_gprs, info->nr_preamble_gprs);
+      compiler_d =
+         MAX2(compiler_d, (uint32_t)info->agx3_preamble_staging_halfs * 2u);
+   }
 
    const uint64_t shared = (uint64_t)info->local_size + variable_shared_mem;
    if (shared > UINT32_MAX)
@@ -8384,6 +8513,8 @@ agx_g17p_append_compute(struct agx_batch *batch,
        * kind the same way. */
       .ldshdr_f1 = indirect_local ? AGX3_G17P_INDIRECT_MAIN_LDSHDR_F1
                                   : AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
+      .constant_program = constant_program,
+      .cprog_inputs = cprog_inputs,
    };
    struct agx3_g17p_compute_program native;
    if (!agx3_g17p_compute_program_generate(dev->chip, &desc, &native))
@@ -16758,7 +16889,7 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
          };
       }
 
-      if (!agx_g17p_append_compute(batch, &cs->b.info, cs->b.binary, cs->bo,
+      if (!agx_g17p_append_compute(batch, cs, &cs->b.info, cs->b.binary, cs->bo,
                                    linked, grid, wg, ranges, range_count,
                                    variable_shared_mem))
          agx_native_descriptor_rejected(dev, "compute Ioto dispatch");
@@ -16849,7 +16980,7 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
          };
       }
 
-      if (!agx_g17p_append_compute(batch, &cs->b.info, cs->b.binary, cs->bo,
+      if (!agx_g17p_append_compute(batch, cs, &cs->b.info, cs->b.binary, cs->bo,
                                    linked, grid, wg, ranges, range_count,
                                    variable_shared_mem)) {
          /* No fallback on either AGX3 part: the AGX2 encoder below writes an
