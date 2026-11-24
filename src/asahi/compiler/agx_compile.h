@@ -517,6 +517,40 @@ agx_is_g18g(const struct agx_device_key *dev)
    return dev->encoding == AGX_ISA_ENCODING_AGX3C && dev->emit_agx3d;
 }
 
+/*
+ * Can nir_opt_uniform_atomics() rewrite a uniform-address atomic in this stage
+ * into one atomic per subgroup? The rewrite elects a lane with the active
+ * thread index in the subgroup (SR 34) and combines the lanes' data with a
+ * subgroup reduction and exclusive scan.
+ *
+ * The AGX3 packer reads SR 34 only in the stages GET_SR_COVERAGE lists
+ * (agx3_pack_binary.c); a geometry or tessellation evaluation shader with a
+ * uniform-address atomic would fail to compile. AGX3C reads the active thread
+ * count (SR 36) as a reduction instead (agx_get_sr_coverage_native_width_to()).
+ *
+ * AGX3C fragment shaders keep one atomic per lane: that reduction also counts
+ * helper invocations after fragment termination (agx_nir_lower_subgroups_m5()),
+ * and nothing shows that SR 34 numbers only the lanes whose atomics take
+ * effect. G18G re-encodes AGX3C code but lowers its subgroup scans separately
+ * (agx_nir_lower_g18_subgroups()), so it keeps one atomic per lane as well.
+ */
+static inline bool
+agx_supports_uniform_atomics(const struct agx_device_key *dev,
+                             mesa_shader_stage stage)
+{
+   switch (dev->encoding) {
+   case AGX_ISA_ENCODING_AGX3B:
+      return stage == MESA_SHADER_COMPUTE || stage == MESA_SHADER_VERTEX ||
+             stage == MESA_SHADER_TESS_CTRL || stage == MESA_SHADER_FRAGMENT;
+   case AGX_ISA_ENCODING_AGX3C:
+      return !agx_is_g18g(dev) &&
+             (stage == MESA_SHADER_COMPUTE || stage == MESA_SHADER_VERTEX ||
+              stage == MESA_SHADER_TESS_CTRL);
+   default:
+      return true;
+   }
+}
+
 struct agx_shader_key {
    /* Device info */
    struct agx_device_key dev;

@@ -10691,8 +10691,8 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
    /*
     * Rewrites a uniform-address atomic into "one lane of the subgroup performs
     * the whole operation", which needs ACTIVE_THREAD_INDEX_IN_SUBGROUP and
-    * TOTAL_ACTIVE_THREADS_IN_SUBGROUP. On AGX3 the caller enables it only in
-    * the stages where the packer admits those (SR 34/36). Skipping it keeps
+    * TOTAL_ACTIVE_THREADS_IN_SUBGROUP. The caller enables it only where
+    * agx_supports_uniform_atomics() admits those. Skipping it keeps
     * atomics correct, at one atomic per lane instead of one per subgroup.
     */
    NIR_PASS(addr_progress, nir, agx_nir_lower_atomics, byte_indices);
@@ -16695,17 +16695,8 @@ agx_compile_shader_nir_internal(nir_shader *nir, struct agx_shader_key *key,
       nir->options = &agx3_options;
    }
 
-   /* The AGX3 packer admits SR 34/36 only on AGX3B and in these stages
-    * (agx3_pack_binary.c, GET_SR_COVERAGE); a geometry or tessellation
-    * evaluation shader with a uniform-address atomic would fail to compile.
-    */
-   const mesa_shader_stage stage = nir->info.stage;
    const bool uniform_atomics =
-      !is_agx3 ||
-      (is_g17p && (stage == MESA_SHADER_COMPUTE ||
-                   stage == MESA_SHADER_VERTEX ||
-                   stage == MESA_SHADER_TESS_CTRL ||
-                   stage == MESA_SHADER_FRAGMENT));
+      agx_supports_uniform_atomics(&key->dev, nir->info.stage);
 
    if (!pre_preamble_optimized) {
       /* Apple's G17P loops are a
