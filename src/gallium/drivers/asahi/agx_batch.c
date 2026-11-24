@@ -359,6 +359,7 @@ agx_batch_init(struct agx_context *ctx,
     * copy (agx_blit) reloads from the single-sample image. */
    batch->g17p_resolve_reload = false;
    batch->g17p_resolve_preserve = key->resolve != NULL;
+   batch->g17g_mrt_resident = false;
    batch->seqnum = ++ctx->batches.seqnum;
    batch->g17p_fragment_program = 0;
    batch->vs_root_valid = false;
