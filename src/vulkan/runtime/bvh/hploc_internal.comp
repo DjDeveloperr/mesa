@@ -22,6 +22,10 @@
  */
 
 #version 460
+#ifdef HPLOC_SHUFFLE_SEARCH
+#extension GL_KHR_shader_subgroup_shuffle_relative : require
+#extension GL_EXT_control_flow_attributes : require
+#endif
 
 #include "vk_bvh_defines.h"
 #define VK_USED_BUILD_FLAGS VK_HPLOC_BUILD_FLAGS
@@ -126,12 +130,6 @@ main(void)
             if (prev_range == 0xffffffff) {
                is_active = false;
             } else {
-               /* The sibling subtree's invocations stored its cluster ids and
-                * box nodes before their exchange (and released them with the
-                * barrier at the end of their iteration). Acquire them before
-                * the merge phase loads them. */
-               memoryBarrier(gl_ScopeDevice, gl_StorageSemanticsBuffer,
-                             gl_SemanticsAcquire | gl_SemanticsMakeVisible);
                if (use_right_parent)
                   range_end = prev_range;
                else
@@ -147,13 +145,25 @@ main(void)
       const uint32_t cluster_threshold = SUBGROUP_SIZE / 2;
       uint32_t range_size = range_end - range_start + 1;
       bool range_is_root = subgroupAny(range_size == active_leaf_count);
-      uint64_t cluster_mask = packUint2x32(subgroupBallot(is_active && (range_is_root || range_size > cluster_threshold)).xy);
-      while (cluster_mask != 0) {
-         uint32_t low = uint32_t(cluster_mask);
-         uint32_t cluster_invoc = low != 0 ? uint32_t(findLSB(low))
-            : 32 + uint32_t(findLSB(uint32_t(cluster_mask >> 32)));
-         /* Clear the LSB. */
-         cluster_mask &= cluster_mask - 1;
+      uvec2 cluster_bits = subgroupBallot(is_active && (range_is_root || range_size > cluster_threshold)).xy;
+      if (SUBGROUP_SIZE <= 32)
+         cluster_bits.y = 0u;
+      bool any_merged = (cluster_bits.x | cluster_bits.y) != 0u;
+      if (any_merged) {
+         /* Acquire sibling subtrees' cluster ids and box nodes written before
+          * their atomicExchange once for all clusters handled in this step. */
+         memoryBarrier(gl_ScopeDevice, gl_StorageSemanticsBuffer,
+                       gl_SemanticsAcquire | gl_SemanticsMakeVisible);
+      }
+      while ((cluster_bits.x | cluster_bits.y) != 0u) {
+         uint32_t cluster_invoc;
+         if (cluster_bits.x != 0u) {
+            cluster_invoc = uint32_t(findLSB(cluster_bits.x));
+            cluster_bits.x &= cluster_bits.x - 1u;
+         } else {
+            cluster_invoc = 32u + uint32_t(findLSB(cluster_bits.y));
+            cluster_bits.y &= cluster_bits.y - 1u;
+         }
 
          uint32_t start = subgroupShuffle(range_start, cluster_invoc);
          uint32_t split = subgroupShuffle(parent_index, cluster_invoc);
@@ -193,15 +203,17 @@ main(void)
 #ifdef HPLOC_SHUFFLE_SEARCH
             /* The same candidates and minimum as the shared-atomic search
              * below: each invocation computes the merged surface area with
-             * each left neighbour and hands it to that neighbour by a
-             * shuffle, so no shared atomics order the steps. Uniform control
-             * flow; past node_count - 1 steps no candidate exists. */
+             * each left neighbour and hands it to that neighbour by an
+             * immediate-delta shuffle-down, so no shared atomics order the
+             * steps. Uniform control flow; past node_count - 1 steps no
+             * candidate exists. */
             uint32_t best_candidate = 0xffffffff;
-            const uint32_t steps = min(uint32_t(SEARCH_RADIUS), node_count - 1);
-            for (uint32_t i = 1; i <= steps; i++) {
+            [[unroll]]
+            for (uint32_t i = 1u; i <= SEARCH_RADIUS; i++) {
+               if (i >= node_count)
+                  break;
                int32_t index = int32_t(gl_SubgroupInvocationID) - int(i);
-               vk_aabb other;
-               other = node_aabbs[max(index, 0)];
+               vk_aabb other = node_aabbs[max(index, 0)];
                vk_aabb shared_bounds;
                shared_bounds.min = min(other.min, node_aabb.min);
                shared_bounds.max = max(other.max, node_aabb.max);
@@ -210,25 +222,28 @@ main(void)
                   best_candidate = min(best_candidate, shared_sa | uint32_t(index));
                /* The invocation i to the right computed this pair's area. */
                uint32_t right = gl_SubgroupInvocationID + i;
-               uint32_t right_sa = subgroupShuffle(shared_sa, right);
+               uint32_t right_sa = subgroupShuffleDown(shared_sa, i);
                if (right < node_count)
                   best_candidate = min(best_candidate, right_sa | right);
             }
 #endif
+            bool do_merge = false;
+            uint32_t other_node_id = VK_BVH_INVALID_NODE;
+            vk_aabb merged_aabb;
             if (gl_SubgroupInvocationID < node_count) {
 #ifndef HPLOC_SHUFFLE_SEARCH
                candidate_infos[gl_SubgroupInvocationID] = 0xffffffff;
                uint32_t best_candidate = 0xffffffff;
-               for (uint32_t i = 1; i <= SEARCH_RADIUS; i++) {
+               const uint32_t steps = min(uint32_t(SEARCH_RADIUS), node_count - 1u);
+               for (uint32_t i = 1; i <= steps; i++) {
                   int32_t index = int32_t(gl_SubgroupInvocationID) - int(i);
-
-                  vk_aabb shared_bounds;
-                  shared_bounds.min = min(node_aabbs[index].min, node_aabb.min);
-                  shared_bounds.max = max(node_aabbs[index].max, node_aabb.max);
-
-                  uint32_t shared_sa = (floatBitsToUint(aabb_surface_area(shared_bounds)) << 1u) & (~(SUBGROUP_SIZE - 1));
                   if (index >= 0) {
-                     uint32_t candidate = shared_sa | index;
+                     vk_aabb shared_bounds;
+                     shared_bounds.min = min(node_aabbs[index].min, node_aabb.min);
+                     shared_bounds.max = max(node_aabbs[index].max, node_aabb.max);
+
+                     uint32_t shared_sa = (floatBitsToUint(aabb_surface_area(shared_bounds)) << 1u) & (~(SUBGROUP_SIZE - 1));
+                     uint32_t candidate = shared_sa | uint32_t(index);
                      best_candidate = min(best_candidate, candidate);
 
                      candidate = shared_sa | gl_SubgroupInvocationID;
@@ -239,11 +254,10 @@ main(void)
                best_candidate = min(best_candidate, candidate_infos[gl_SubgroupInvocationID]);
 #endif
                uint32_t best_index = best_candidate & (SUBGROUP_SIZE - 1);
-               uint32_t other_node_id = node_ids[best_index];
+               other_node_id = node_ids[best_index];
 
-               vk_aabb shared_bounds;
-               shared_bounds.min = min(node_aabbs[best_index].min, node_aabb.min);
-               shared_bounds.max = max(node_aabbs[best_index].max, node_aabb.max);
+               merged_aabb.min = min(node_aabbs[best_index].min, node_aabb.min);
+               merged_aabb.max = max(node_aabbs[best_index].max, node_aabb.max);
 
                /* There is always at least on pair of invocations that can be merged because there is a finite number of pairs and
                 * one of them therefore has a minimum surface area. If more than two nodes have the exact same surface area, the
@@ -255,29 +269,42 @@ main(void)
 
                if (merge) {
                   if (gl_SubgroupInvocationID < best_index) {
-                     uint32_t dst_index = atomicAdd(DEREF(header).ir_internal_node_count, 1);
-                     uint32_t dst_offset = args.internal_node_base + dst_index * SIZEOF(vk_ir_box_node);
-
-                     node_aabb = shared_bounds;
-
-                     REF(vk_ir_box_node) node = REF(vk_ir_box_node)(OFFSET(args.bvh, dst_offset));
-                     DEREF(node).base.aabb = shared_bounds;
-                     DEREF(node).children[0] = node_id;
-                     DEREF(node).children[1] = other_node_id;
-                     DEREF(node).bvh_offset = VK_UNKNOWN_BVH_OFFSET;
-                     if (VK_TEST_BUILD_FLAG_PROPAGATE_CULL_FLAGS) {
-                        DEREF(node).flags = fetch_child_flags(args.bvh, node_id) & fetch_child_flags(args.bvh, other_node_id);
-                     }
-
-                     node_id = pack_ir_node_id(dst_offset, vk_ir_node_internal);
+                     do_merge = true;
                   } else {
                      node_id = VK_BVH_INVALID_NODE;
                   }
                }
             }
 
-            node_count = subgroupBallotBitCount(subgroupBallot(node_id != VK_BVH_INVALID_NODE));
-            uint32_t node_prefix_sum = subgroupBallotExclusiveBitCount(subgroupBallot(node_id != VK_BVH_INVALID_NODE));
+            uvec4 merge_ballot = subgroupBallot(do_merge);
+            uint32_t merge_count = subgroupBallotBitCount(merge_ballot);
+            uint32_t dst_base = 0u;
+            if (merge_count != 0u) {
+               if (subgroupElect())
+                  dst_base = atomicAdd(DEREF(header).ir_internal_node_count, merge_count);
+               dst_base = subgroupBroadcastFirst(dst_base);
+            }
+            if (do_merge) {
+               uint32_t dst_index = dst_base + subgroupBallotExclusiveBitCount(merge_ballot);
+               uint32_t dst_offset = args.internal_node_base + dst_index * SIZEOF(vk_ir_box_node);
+
+               node_aabb = merged_aabb;
+
+               REF(vk_ir_box_node) node = REF(vk_ir_box_node)(OFFSET(args.bvh, dst_offset));
+               DEREF(node).base.aabb = merged_aabb;
+               DEREF(node).children[0] = node_id;
+               DEREF(node).children[1] = other_node_id;
+               DEREF(node).bvh_offset = VK_UNKNOWN_BVH_OFFSET;
+               if (VK_TEST_BUILD_FLAG_PROPAGATE_CULL_FLAGS) {
+                  DEREF(node).flags = fetch_child_flags(args.bvh, node_id) & fetch_child_flags(args.bvh, other_node_id);
+               }
+
+               node_id = pack_ir_node_id(dst_offset, vk_ir_node_internal);
+            }
+
+            uvec4 valid_ballot = subgroupBallot(node_id != VK_BVH_INVALID_NODE);
+            node_count = subgroupBallotBitCount(valid_ballot);
+            uint32_t node_prefix_sum = subgroupBallotExclusiveBitCount(valid_ballot);
             if (node_id != VK_BVH_INVALID_NODE) {
                node_ids[node_prefix_sum] = node_id;
                node_aabbs[node_prefix_sum] = node_aabb;
@@ -292,9 +319,13 @@ main(void)
                DEREF(INDEX(key32_id_pair, args.ids, start + gl_SubgroupInvocationID)).id = dst_node;
 	    }
          }
+      }
 
+      if (any_merged) {
+         /* Release all cluster ids and box nodes written in this step before
+          * the next iteration's atomicExchange exposes them to parent waves. */
          memoryBarrier(gl_ScopeDevice, gl_StorageSemanticsBuffer,
-                       gl_SemanticsAcquireRelease | gl_SemanticsMakeAvailable | gl_SemanticsMakeVisible);
+                       gl_SemanticsRelease | gl_SemanticsMakeAvailable);
       }
    }
 }
