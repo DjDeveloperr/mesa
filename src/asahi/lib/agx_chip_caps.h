@@ -99,6 +99,17 @@ enum agx_chip_cap {
     * DRM_ASAHI_FEATURE_M5_DEPTH_MSAA_COMPRESSION. Measured on M5 (G17S,
     * G17C); off on G18G until measured there. */
    AGX_CAP_GEN10_2D_COMPRESSION = 1u << 14,
+
+   /* HAL200/Gen9 lossless colour and depth/stencil compression in Borealis:
+    * 1-8B colour (2D, arrays, cubemaps, single-mip 3D, 2x/4x MSAA), 16B colour
+    * (single-sample 2D, arrays, cubemaps), single-level 1x/2x/4x depth and 1x
+    * stencil, shared DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED colour images,
+    * in-place spill decompression via libagx_agx3_decompress, and Gen9
+    * compressed compute mip blits. Enabled across native HAL200 AGX3B parts
+    * (G16G and G17P), which share the Gen9 PBE/texture/ZLS/AIL metadata
+    * contract; off on G15* (M3, G15/RTKit 2419 CS generation), M5 HAL300
+    * (Gen10, gated separately), G18G, and AGX2. */
+   AGX_CAP_HAL200_LOSSLESS_COMPRESSION = 1u << 15,
 };
 
 /* What the admitted AGX2 chips (G13G, G13X, G14G, G14X) share. */
@@ -117,7 +128,8 @@ enum agx_chip_cap {
     AGX_CAP_VDM_INDIRECT_INDEX_BOUNDS |                                        \
     AGX_CAP_TRI_MERGE_ACROSS_SIDE_EFFECTS | AGX_CAP_SPARSE_RESIDENCY_3D |      \
     AGX_CAP_COALESCE_PURE_GLOBAL_WORKGROUPS | AGX_CAP_CDM_WAR_WEAK_BARRIER |   \
-    AGX_CAP_GEN9_2D_COMPRESSION | AGX_CAP_MOD3_REG_BANK_RA)
+    AGX_CAP_GEN9_2D_COMPRESSION | AGX_CAP_MOD3_REG_BANK_RA |                   \
+    AGX_CAP_HAL200_LOSSLESS_COMPRESSION)
 
 /* What the M5 parts (G17G, G17S, G17C) share. */
 #define AGX_CAPS_M5                                                            \
@@ -144,7 +156,10 @@ enum agx_chip_cap {
    X(G15C, AGX_CAPS_NATIVE, __VA_ARGS__)                                       \
    X(G15D, AGX_CAP_COOPERATIVE_MATRIX, __VA_ARGS__)                            \
    X(G16P, AGX_CAP_COOPERATIVE_MATRIX, __VA_ARGS__)                            \
-   X(G16G, AGX_CAPS_NATIVE | AGX_CAP_NATIVE_PREAMBLE, __VA_ARGS__)             \
+   X(G16G,                                                                     \
+     AGX_CAPS_NATIVE | AGX_CAP_NATIVE_PREAMBLE |                               \
+        AGX_CAP_HAL200_LOSSLESS_COMPRESSION,                                   \
+     __VA_ARGS__)                                                              \
    X(G16S, AGX_CAP_COOPERATIVE_MATRIX, __VA_ARGS__)                            \
    X(G16C, AGX_CAP_COOPERATIVE_MATRIX, __VA_ARGS__)                            \
    X(G17P, AGX_CAPS_G17P, __VA_ARGS__)                                         \

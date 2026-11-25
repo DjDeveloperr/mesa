@@ -130,7 +130,82 @@ main(void)
    assert(hk_g17p_decompress_image_type_supported(VK_IMAGE_TYPE_2D));
    assert(!hk_g17p_decompress_image_type_supported(VK_IMAGE_TYPE_3D));
 
-   printf("HAL200 decompression: 14 kernels (G17P+G16G) + %u formats x 6 shapes passed\n",
-          format_count);
+   /* Verify Gen9 compressed AIL layout + PBE descriptor emission for the key
+    * HAL200 targets (rgba8, rgba16f, rgba32f 1x 2D/array, d32f via R32_UINT
+    * copy alias, and 2x/4x MSAA rgba8/rgba16f). */
+   static const struct {
+      enum pipe_format format;
+      unsigned samples;
+      unsigned layers;
+   } pbe_cases[] = {
+      { PIPE_FORMAT_R8G8B8A8_UNORM, 1, 1 },
+      { PIPE_FORMAT_R8G8B8A8_UNORM, 1, 4 },
+      { PIPE_FORMAT_R8G8B8A8_UNORM, 2, 1 },
+      { PIPE_FORMAT_R8G8B8A8_UNORM, 4, 1 },
+      { PIPE_FORMAT_R16G16B16A16_FLOAT, 1, 1 },
+      { PIPE_FORMAT_R16G16B16A16_FLOAT, 4, 1 },
+      { PIPE_FORMAT_R32G32B32A32_FLOAT, 1, 1 },
+      { PIPE_FORMAT_R32G32B32A32_FLOAT, 1, 6 },
+      { PIPE_FORMAT_R32_UINT, 1, 1 },
+      { PIPE_FORMAT_R32_UINT, 1, 4 },
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(pbe_cases); ++i) {
+      struct ail_layout layout = {
+         .policy = ail_layout_policy_for_descriptor_generation(
+            agx_chip_descriptor_generation(AGX_CHIP_G16G)),
+         .tiling = AIL_TILING_GPU,
+         .compressed = true,
+         .format = pbe_cases[i].format,
+         .width_px = 512,
+         .height_px = 512,
+         .depth_px = pbe_cases[i].layers,
+         .levels = 1,
+         .sample_count_sa = pbe_cases[i].samples,
+         .renderable = true,
+      };
+      ail_make_miptree(&layout);
+      assert(layout.policy == AIL_LAYOUT_POLICY_LEGACY);
+      assert(layout.metadata_offset_B > 0);
+      assert(layout.compression_layer_stride_B > 0);
+      assert(layout.compression_layer_stride_B % AIL_CACHELINE == 0);
+      assert(ail_is_level_logically_compressed(&layout, 0));
+
+      const bool msaa = pbe_cases[i].samples > 1;
+      const bool layered = pbe_cases[i].layers > 1;
+      struct AGX_PBE pbe = {
+         AGX_PBE_header,
+         .dimension =
+            msaa ? (layered ? AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED
+                            : AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED)
+                 : (layered ? AGX_TEXTURE_DIMENSION_2D_ARRAY
+                            : AGX_TEXTURE_DIMENSION_2D),
+         .layout = AGX_LAYOUT_GPU,
+         .channels = ail_pixel_format[pbe_cases[i].format].channels,
+         .type = ail_pixel_format[pbe_cases[i].format].type,
+         .swizzle_r = AGX_CHANNEL_R,
+         .swizzle_g = AGX_CHANNEL_G,
+         .swizzle_b = AGX_CHANNEL_B,
+         .swizzle_a = AGX_CHANNEL_A,
+         .buffer = 0x100000,
+         .width = layout.width_px,
+         .height = layout.height_px,
+         .layers = pbe_cases[i].layers,
+         .levels = 1,
+         .level = 0,
+         .page_aligned_layers = layout.page_aligned_layers,
+         .compressed = true,
+         .extended = true,
+         .acceleration_buffer = 0x100000 + layout.metadata_offset_B,
+      };
+      if (msaa)
+         pbe.samples = pbe_cases[i].samples == 4 ? AGX_SAMPLE_COUNT_4
+                                                 : AGX_SAMPLE_COUNT_2;
+      struct hk_native_pbe_descriptor packed_pbe;
+      assert(hk_pack_native_pbe(
+         agx_chip_descriptor_generation(AGX_CHIP_G16G), &packed_pbe, &pbe));
+   }
+
+   printf("HAL200 decompression: 14 kernels (G17P+G16G) + %u formats x 6 shapes + %zu PBE layouts passed\n",
+          format_count, ARRAY_SIZE(pbe_cases));
    return 0;
 }

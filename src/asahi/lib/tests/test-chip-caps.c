@@ -46,7 +46,7 @@ static const unsigned all_caps =
    (0 CAPS(CAP_BIT)) | AGX_CAP_SPARSE_RESIDENCY_3D | AGX_CAP_DESCRIPTOR_BUFFER |
    AGX_CAP_COALESCE_PURE_GLOBAL_WORKGROUPS | AGX_CAP_CDM_WAR_WEAK_BARRIER |
    AGX_CAP_GEN9_2D_COMPRESSION | AGX_CAP_MOD3_REG_BANK_RA |
-   AGX_CAP_GEN10_2D_COMPRESSION;
+   AGX_CAP_GEN10_2D_COMPRESSION | AGX_CAP_HAL200_LOSSLESS_COMPRESSION;
 #undef CAP_BIT
 
 /* Each chip of AGX_CHIPS has exactly one row, and the rows are in its
@@ -160,6 +160,24 @@ test_gen10_2d_compression(void)
    }
 }
 
+/* AGX_CAP_HAL200_LOSSLESS_COMPRESSION is enabled across native HAL200 AGX3B
+ * parts (G16G and G17P) and off on G15* (M3), M5 HAL300 (Gen10), G18G, AGX2,
+ * and unadmitted parts. */
+static void
+test_hal200_lossless_compression(void)
+{
+   for (unsigned i = 0; i <= AGX_CHIP_UNKNOWN; ++i) {
+      const enum agx_chip c = (enum agx_chip)i;
+      const bool expected = c == AGX_CHIP_G16G || c == AGX_CHIP_G17P;
+      CHECK_CHIP(agx_chip_has_cap(c, AGX_CAP_HAL200_LOSSLESS_COMPRESSION) ==
+                    expected,
+                 c);
+      CHECK_CHIP(agx_chip_has_cap(c, AGX_CAP_HAL200_LOSSLESS_COMPRESSION) ==
+                    agx_chip_native_hal200(c),
+                 c);
+   }
+}
+
 int
 main(void)
 {
@@ -170,6 +188,7 @@ main(void)
    test_cdm_war_weak_barrier();
    test_mod3_reg_bank_ra();
    test_gen10_2d_compression();
+   test_hal200_lossless_compression();
 
    if (failures) {
       fprintf(stderr, "agx_chip_caps: %u of %u checks failed\n", failures,
