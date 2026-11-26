@@ -160,8 +160,11 @@ enum agx_chip_cap {
    /* Command-buffer, root-descriptor, VDM-slab, Ioto-arena, and descriptor-pool
     * BOs are mapped CPU write-back (AGX_BO_WRITEBACK) when util_has_cache_ops()
     * is available, cleaned before GPU submission, enabling CPU-cached root
-    * reuse, push-descriptor elision, and direct fragment-root comparisons
-    * without shadow snapshots. Qualified on G17P and M5 (G17G, G17S, G17C). */
+    * reuse, push-descriptor elision, slab span suballocation, and direct
+    * fragment-root comparisons without shadow snapshots. Qualified on native
+    * AGX3 (G15/G16G/G17P) and M5 (G17G/G17S/G17C); AGX2 keeps write-combined
+    * command pools because explicit cache-clean overhead outweighed reuse on
+    * J316s/J413 gpubench-vk ABBA. */
    AGX_CAP_CACHED_CMD_MEMORY = 1u << 22,
 };
 
@@ -174,7 +177,7 @@ enum agx_chip_cap {
 #define AGX_CAPS_NATIVE                                                        \
    (AGX_CAP_NATIVE_INDIRECT_COMPUTE | AGX_CAP_NATIVE_IMAGEBLOCK |              \
     AGX_CAP_ELIDE_APP_DISPATCH_BARRIER | AGX_CAP_COOPERATIVE_MATRIX |          \
-    AGX_CAP_DESCRIPTOR_BUFFER)
+    AGX_CAP_DESCRIPTOR_BUFFER | AGX_CAP_CACHED_CMD_MEMORY)
 
 #define AGX_CAPS_G17P                                                          \
    (AGX_CAPS_NATIVE | AGX_CAP_NATIVE_PREAMBLE |                                \
@@ -184,8 +187,7 @@ enum agx_chip_cap {
     AGX_CAP_CDM_WAR_WEAK_BARRIER | AGX_CAP_GEN9_2D_COMPRESSION |               \
     AGX_CAP_MOD3_REG_BANK_RA | AGX_CAP_HAL200_LOSSLESS_COMPRESSION |           \
     AGX_CAP_HAL200_MSAA_COLOR_COMPRESSION |                                    \
-    AGX_CAP_SIGNED_ZERO_MINMAX_SELECT | AGX_CAP_CDM_OVERLAP_SPLIT |            \
-    AGX_CAP_CACHED_CMD_MEMORY)
+    AGX_CAP_SIGNED_ZERO_MINMAX_SELECT | AGX_CAP_CDM_OVERLAP_SPLIT)
 
 /* What the M5 parts (G17G, G17S, G17C) share. */
 #define AGX_CAPS_M5                                                            \

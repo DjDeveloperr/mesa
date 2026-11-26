@@ -262,6 +262,21 @@ test_signed_zero_minmax_select(void)
    }
 }
 
+/* AGX_CAP_CACHED_CMD_MEMORY is enabled across native AGX3 and M5; AGX2 keeps
+ * write-combined pools, and G18G/unadmitted chips keep it off until qualified. */
+static void
+test_cached_cmd_memory(void)
+{
+   for (unsigned i = 0; i <= AGX_CHIP_UNKNOWN; ++i) {
+      const enum agx_chip c = (enum agx_chip)i;
+      const bool expected =
+         c == AGX_CHIP_G15G || c == AGX_CHIP_G15S || c == AGX_CHIP_G15C ||
+         c == AGX_CHIP_G16G || c == AGX_CHIP_G17P || c == AGX_CHIP_G17G ||
+         c == AGX_CHIP_G17S || c == AGX_CHIP_G17C;
+      CHECK_CHIP(agx_chip_has_cap(c, AGX_CAP_CACHED_CMD_MEMORY) == expected, c);
+   }
+}
+
 int
 main(void)
 {
@@ -278,6 +293,7 @@ main(void)
    test_hal200_lossless_compression();
    test_hal200_msaa_color_compression();
    test_signed_zero_minmax_select();
+   test_cached_cmd_memory();
 
    if (failures) {
       fprintf(stderr, "agx_chip_caps: %u of %u checks failed\n", failures,
