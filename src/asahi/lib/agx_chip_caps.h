@@ -67,8 +67,8 @@ enum agx_chip_cap {
     * larger power-of-two hardware workgroups (up to 256 threads, or 512 for
     * short low-register loop-free shaders) to avoid the AGX3 CDM per-workgroup
     * launch-rate floor on large grids. Measured and qualified on G17P
-    * (HAL200) and M5 (G17G/G17S/G17C, HAL300); off on G15, G16, G18G, and
-    * AGX2 until per-generation hardware A/B and CTS rows are collected. */
+    * (HAL200) and M5 (G17G/G17S/G17C, HAL300); off on G17D, G15, G16, G18G,
+    * and AGX2 until per-generation hardware A/B and CTS rows are collected. */
    AGX_CAP_COALESCE_PURE_GLOBAL_WORKGROUPS = 1u << 10,
 
    /* A compute or transfer barrier between work of one CDM stream that makes
@@ -187,7 +187,7 @@ enum agx_chip_cap {
     AGX_CAP_SIGNED_ZERO_MINMAX_SELECT | AGX_CAP_CDM_OVERLAP_SPLIT |            \
     AGX_CAP_CACHED_CMD_MEMORY)
 
-/* What the M5 parts (G17G, G17S, G17C) share. */
+/* What the single-die M5 parts (G17G, G17S, G17C) share. */
 #define AGX_CAPS_M5                                                            \
    (AGX_CAP_ELIDE_APP_DISPATCH_BARRIER | AGX_CAP_VDM_INDIRECT_INDEX_BOUNDS |   \
     AGX_CAP_HW_TXF_BOUNDS | AGX_CAP_COOPERATIVE_MATRIX |                       \
@@ -196,6 +196,22 @@ enum agx_chip_cap {
     AGX_CAP_GEN10_2D_COMPRESSION | AGX_CAP_MOD3_REG_BANK_RA |                  \
     AGX_CAP_SIGNED_ZERO_MINMAX_SELECT | AGX_CAP_CDM_OVERLAP_SPLIT |            \
     AGX_CAP_CACHED_CMD_MEMORY)
+
+/* G17D partitions AGX_CAPS_M5 into measured capabilities (enabled) and
+ * unmeasured exclusions (kept off until measured on J775D). test-chip-caps.c
+ * asserts the two sets are disjoint and cover AGX_CAPS_M5, so adding a new
+ * capability to AGX_CAPS_M5 forces an explicit decision for G17D. */
+#define AGX_CAPS_G17D_MEASURED                                                 \
+   (AGX_CAP_ELIDE_APP_DISPATCH_BARRIER | AGX_CAP_COOPERATIVE_MATRIX |          \
+    AGX_CAP_SPARSE_BINDING | AGX_CAP_GEN10_2D_COMPRESSION)
+
+#define AGX_CAPS_G17D_EXCLUDED                                                 \
+   (AGX_CAP_VDM_INDIRECT_INDEX_BOUNDS | AGX_CAP_HW_TXF_BOUNDS |                \
+    AGX_CAP_DESCRIPTOR_BUFFER | AGX_CAP_COALESCE_PURE_GLOBAL_WORKGROUPS |      \
+    AGX_CAP_CDM_WAR_WEAK_BARRIER | AGX_CAP_SIGNED_ZERO_MINMAX_SELECT |         \
+    AGX_CAP_CDM_OVERLAP_SPLIT | AGX_CAP_CACHED_CMD_MEMORY)
+
+#define AGX_CAPS_G17D AGX_CAPS_G17D_MEASURED
 
 /*
  * One row per chip of AGX_CHIPS, in the same order: chip, capabilities.
@@ -227,6 +243,7 @@ enum agx_chip_cap {
    X(G17G, AGX_CAPS_M5, __VA_ARGS__)                                           \
    X(G17S, AGX_CAPS_M5, __VA_ARGS__)                                           \
    X(G17C, AGX_CAPS_M5, __VA_ARGS__)                                           \
+   X(G17D, AGX_CAPS_G17D, __VA_ARGS__)                                         \
    X(G18G, AGX_CAP_ZLS_FULL_RENDER_BOUNDS | AGX_CAP_NATIVE_MIXED_EPILOG,       \
      __VA_ARGS__)
 
