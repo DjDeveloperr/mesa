@@ -1,0 +1,48 @@
+name: i686 Vulkan packaging check
+
+on:
+  push:
+    branches:
+      - ci/mesa-i686-1115-evidence
+
+permissions:
+  contents: read
+
+jobs:
+  i686:
+    runs-on: ubuntu-24.04
+    container: fedora:44
+    timeout-minutes: 45
+    steps:
+      - name: Install packaging dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          dnf -y install git curl python3
+          spec_url=https://raw.githubusercontent.com/aurora-silicon/fedora-aurora/f261732f0a6fb454550314ba253eaf4a8a343031/packages/mesa-aurora-fex-guest/mesa-aurora-fex-guest.spec
+          curl -fsSL "$spec_url" -o /tmp/mesa-fex.spec
+          sed -n '/^BuildRequires: /s/^BuildRequires: //p' /tmp/mesa-fex.spec |
+            sed -e 's/(x86-64)/.x86_64/g' -e 's/(x86-32)/.i686/g' |
+            xargs dnf -y install
+      - uses: actions/checkout@v4
+      - name: Build the Fedora recipe's i686 Asahi Vulkan driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          spec = Path("/tmp/mesa-fex.spec").read_text()
+          recipe = spec.split("\n%build\n", 1)[1].split("\n%install\n", 1)[0]
+          assert "meson setup b32" in recipe and "ninja -C b32" in recipe
+          recipe = "\n".join(line for line in recipe.splitlines()
+                             if "meson setup b64" not in line and not line.startswith("ninja -C b64"))
+          recipe = recipe.replace("%{commit}", "8e6ed217c8827e17afff71e7cb7c9330434aebe9")
+          recipe = recipe.replace("%{?_smp_mflags}", "-j4")
+          recipe = recipe.replace("ninja -C b32 -j4",
+                                  "ninja -C b32 -j4 src/asahi/vulkan/libvulkan_asahi.so")
+          Path("/tmp/build-i686.sh").write_text(recipe)
+          PY
+          bash -e /tmp/build-i686.sh
+          file b32/src/asahi/vulkan/libvulkan_asahi.so
+          readelf -h b32/src/asahi/vulkan/libvulkan_asahi.so |
+            grep -E 'ELF32|Intel 80386'
