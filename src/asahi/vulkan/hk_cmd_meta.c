@@ -981,15 +981,17 @@ is_format_native(enum pipe_format format)
    }
 }
 
-/* nir_format_pack_rgba(), except that R11G11B10 keeps NaN. A compressed
- * R11G11B10 image is copied through its own class (an R32_UINT view cannot
- * decode it), so its texels pass through float, and the texture unit returns
- * a NaN field as NaN. nir_format_pack_11f11f10f() clamps with fmax(), which
- * turns NaN into zero, and a float compare-and-select clamp did not keep it
- * either, so the fields are fixed up from the texels' own bits with integer
- * compares: NaN stays NaN, a negative value becomes zero, and every other
- * value converts through float16 exactly (an 11- or 10-bit float is a
- * float16 with the sign and low mantissa bits dropped). */
+/* R11G11B10 copies keep the packed word, NaN payloads included, as
+ * hk_can_compress() requires of copies. A compressed R11G11B10 image is
+ * copied through its own class (an R32_UINT view cannot decode it), so its
+ * texels pass through float. The texture unit widens a NaN field to a float
+ * NaN with the field's payload in the top mantissa bits, and the PBE narrows
+ * one the same way. nir_format_pack_11f11f10f() clamps with fmax(), which
+ * turns NaN into zero, and nir_format_unpack_11f11f10f() goes through
+ * float16, so both directions here handle NaN on the bits with integer
+ * operations; every other value converts through float16 exactly (an 11- or
+ * 10-bit float is a float16 without its sign and low mantissa bits).
+ */
 static nir_def *
 hk_pack_rgba(nir_builder *b, enum pipe_format format, nir_def *color)
 {
@@ -998,18 +1000,52 @@ hk_pack_rgba(nir_builder *b, enum pipe_format format, nir_def *color)
 
    nir_def *packed = nir_imm_int(b, 0);
    for (unsigned c = 0; c < 3; ++c) {
-      const unsigned drop = c == 2 ? 5 : 4, mask = c == 2 ? 0x3ff : 0x7ff;
+      const unsigned mantissa = c == 2 ? 5 : 6, size = mantissa + 5;
       nir_def *bits = nir_channel(b, color, c);
       nir_def *nan = nir_ult(b, nir_imm_int(b, 0x7f800000),
                              nir_iand_imm(b, bits, 0x7fffffff));
       nir_def *negative = nir_ilt(b, bits, nir_imm_int(b, 0));
       nir_def *field = nir_iand_imm(
-         b, nir_ushr_imm(b, nir_u2u32(b, nir_f2f16(b, bits)), drop), mask);
+         b, nir_ushr_imm(b, nir_u2u32(b, nir_f2f16(b, bits)), 10 - mantissa),
+         BITFIELD_MASK(size));
       field = nir_bcsel(b, negative, nir_imm_int(b, 0), field);
-      field = nir_bcsel(b, nan, nir_imm_int(b, 0x3f0 << (c == 2 ? 0 : 1)), field);
+
+      /* The payload from the top mantissa bits; a NaN without one there
+       * takes the quiet bit, so that it stays a NaN. */
+      nir_def *payload = nir_ubfe_imm(b, bits, 23 - mantissa, mantissa);
+      payload = nir_bcsel(b, nir_ieq_imm(b, payload, 0),
+                          nir_imm_int(b, 1 << (mantissa - 1)), payload);
+      field = nir_bcsel(b, nan,
+                        nir_ior_imm(b, payload, 0x1f << mantissa), field);
       packed = nir_ior(b, packed, nir_ishl_imm(b, field, 11 * c));
    }
    return packed;
+}
+
+/* nir_format_unpack_rgba(), except that R11G11B10 NaN fields keep their
+ * payload (see hk_pack_rgba()). */
+static nir_def *
+hk_unpack_rgba(nir_builder *b, nir_def *packed, enum pipe_format format)
+{
+   nir_def *color = nir_format_unpack_rgba(b, packed, format);
+   if (format != PIPE_FORMAT_R11G11B10_FLOAT)
+      return color;
+
+   nir_def *channels[4];
+   for (unsigned c = 0; c < 4; ++c)
+      channels[c] = nir_channel(b, color, c);
+   for (unsigned c = 0; c < 3; ++c) {
+      const unsigned mantissa = c == 2 ? 5 : 6;
+      nir_def *field = nir_ubfe_imm(b, packed, 11 * c, mantissa + 5);
+      nir_def *payload = nir_iand_imm(b, field, BITFIELD_MASK(mantissa));
+      nir_def *nan = nir_iand(b, nir_uge_imm(b, field, 0x1f << mantissa),
+                              nir_ine_imm(b, payload, 0));
+      channels[c] = nir_bcsel(
+         b, nan,
+         nir_ior_imm(b, nir_ishl_imm(b, payload, 23 - mantissa), 0x7f800000),
+         channels[c]);
+   }
+   return nir_vec(b, channels, 4);
 }
 
 static nir_def *
@@ -1066,7 +1102,7 @@ load_store_formatted(nir_builder *b, nir_def *base, nir_def *index,
                                         MIN2(32, blocksize_B * 8), addr,
                                         .align_mul = blocksize_B);
 
-         return nir_format_unpack_rgba(b, raw, format);
+         return hk_unpack_rgba(b, raw, format);
       }
    }
 
@@ -1219,7 +1255,7 @@ build_image_copy_shader(const struct vk_meta_image_copy_key *key,
                   nir_def *packed =
                      hk_pack_rgba(b, key->src_format, value1);
 
-                  value1 = nir_format_unpack_rgba(b, packed, key->dst_format);
+                  value1 = hk_unpack_rgba(b, packed, key->dst_format);
                }
             }
 

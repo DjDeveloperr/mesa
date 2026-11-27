@@ -4,10 +4,12 @@
  * NaN and infinity in B10G11R11 images, compressed or not.
  *
  * Vulkan converts a NaN to a NaN of the unsigned 10- and 11-bit float formats,
- * and a bit-exact copy keeps it. Every write path stores a pattern with NaN
- * and +inf texels in each channel (vulkan_b10g11r11_nan_pattern.glsl), and
- * every read path checks each texel: NaN reads back as a NaN, +inf as +inf,
- * every other value exactly.
+ * and copies keep the packed word, NaN payloads included. Every write path
+ * stores a pattern with NaN and +inf texels in each channel
+ * (vulkan_b10g11r11_nan_pattern.glsl), and every read path checks each
+ * texel: NaN reads back as a NaN, +inf as +inf, every other value exactly.
+ * The upload stores every non-zero NaN payload in turn, which both copies
+ * must return bit for bit.
  *
  * Images: "storage" (STORAGE | SAMPLED | TRANSFER | COLOR_ATTACHMENT, ALIAS,
  * the shape of vkd3d-proton's placed UAV/render targets) and "colour"
@@ -15,7 +17,8 @@
  * Writes: render (clear, full-screen draw, store), render2 (render, then a
  * load/store pass drawing one texel), store (compute imageStore, storage
  * image only) and upload (vkCmdCopyBufferToImage of the packed words).
- * Reads: copy (vkCmdCopyImageToBuffer), fetch (texelFetch) and load
+ * Reads: copy (vkCmdCopyImageToBuffer), imgcopy (vkCmdCopyImage to an
+ * R32_UINT image, then vkCmdCopyImageToBuffer), fetch (texelFetch) and load
  * (imageLoad, storage image only).
  *
  * Run it with and without the driver compressing the images
@@ -143,22 +146,34 @@ expect(uint32_t x, uint32_t y)
    return t;
 }
 
+/* The NaN payload of a NaN field: the quiet NaN, or with payloads every
+ * non-zero mantissa in turn (6 bits for R and G, 5 for B). */
 static uint32_t
-pack_expected(uint32_t x, uint32_t y)
+nan_mantissa(uint32_t x, uint32_t y, int c, bool payloads)
+{
+   const unsigned mb = c == 2 ? 5 : 6, n = (1u << mb) - 1;
+   return payloads ? 1 + (x * 7 + y * 3 + c) % n : 1u << (mb - 1);
+}
+
+static uint32_t
+pack_expected(uint32_t x, uint32_t y, bool payloads)
 {
    struct texel t = expect(x, y);
    uint32_t e[3];
    for (int c = 0; c < 3; ++c) {
       unsigned mb = c == 2 ? 5 : 6;
-      e[c] = t.kind[c] == 1 ? ((31u << mb) | (1u << (mb - 1))) : t.kind[c] == 2 ? (31u << mb) : t.enc[c];
+      e[c] = t.kind[c] == 1 ? ((31u << mb) | nan_mantissa(x, y, c, payloads))
+             : t.kind[c] == 2 ? (31u << mb) : t.enc[c];
    }
    return e[0] | (e[1] << 11) | (e[2] << 22);
 }
 
 struct tally { unsigned nan_ok, nan_n, inf_ok, inf_n, oth_ok, oth_n; char first[160]; };
 
+/* exact: the image holds pack_expected(x, y, true) words, and every NaN field
+ * must come back with its payload */
 static void
-check_word(struct tally *T, uint32_t x, uint32_t y, uint32_t v)
+check_word(struct tally *T, uint32_t x, uint32_t y, uint32_t v, bool exact)
 {
    struct texel t = expect(x, y);
    uint32_t ch[3] = {v & 0x7ff, (v >> 11) & 0x7ff, v >> 22};
@@ -166,11 +181,16 @@ check_word(struct tally *T, uint32_t x, uint32_t y, uint32_t v)
       unsigned mb = c == 2 ? 5 : 6;
       uint32_t ex = ch[c] >> mb, ma = ch[c] & ((1u << mb) - 1);
       bool ok;
-      if (t.kind[c] == 1) { T->nan_n++; ok = ex == 31 && ma; T->nan_ok += ok; }
+      if (t.kind[c] == 1) {
+         T->nan_n++;
+         ok = ex == 31 && (exact ? ma == nan_mantissa(x, y, c, true) : ma != 0);
+         T->nan_ok += ok;
+      }
       else if (t.kind[c] == 2) { T->inf_n++; ok = ex == 31 && !ma; T->inf_ok += ok; }
       else { T->oth_n++; ok = ch[c] == t.enc[c]; T->oth_ok += ok; }
       if (!ok && !T->first[0])
-         snprintf(T->first, sizeof(T->first), "%u,%u c%d word=0x%08x want=0x%08x", x, y, c, v, pack_expected(x, y));
+         snprintf(T->first, sizeof(T->first), "%u,%u c%d word=0x%08x want=0x%08x", x, y, c, v,
+                  pack_expected(x, y, exact));
    }
 }
 
@@ -195,7 +215,7 @@ static unsigned
 print_tally(const char *kind, const char *wr, const char *rd, const struct tally *T)
 {
    const bool ok = T->nan_ok == T->nan_n && T->inf_ok == T->inf_n && T->oth_ok == T->oth_n;
-   printf("RESULT %-7s %-7s %-5s nan=%u/%u inf=%u/%u other=%u/%u %s%s%s\n", kind, wr, rd, T->nan_ok,
+   printf("RESULT %-7s %-7s %-7s nan=%u/%u inf=%u/%u other=%u/%u %s%s%s\n", kind, wr, rd, T->nan_ok,
           T->nan_n, T->inf_ok, T->inf_n, T->oth_ok, T->oth_n, ok ? "PASS" : "FAIL",
           T->first[0] ? " first " : "", T->first);
    return !ok;
@@ -298,29 +318,34 @@ run(int kind, int wpath)
       .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
    VkImage img;
    CHECK(vkCreateImage(dev, &ci, NULL, &img));
+   /* the image-to-image copy destination: the same texel size, read back raw */
+   VkImageCreateInfo rci = ci;
+   rci.flags = 0;
+   rci.format = VK_FORMAT_R32_UINT;
+   rci.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+   VkImage rimg;
+   CHECK(vkCreateImage(dev, &rci, NULL, &rimg));
+   VkDeviceMemory im, rm;
    VkMemoryRequirements ir;
    vkGetImageMemoryRequirements(dev, img, &ir);
-   VkBuffer alias;
-   CHECK(vkCreateBuffer(dev, &(VkBufferCreateInfo){.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size = ir.size, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT}, NULL, &alias));
-   VkMemoryRequirements ar;
-   vkGetBufferMemoryRequirements(dev, alias, &ar);
-   VkDeviceMemory im;
    CHECK(vkAllocateMemory(dev, &(VkMemoryAllocateInfo){.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-      .allocationSize = ir.size > ar.size ? ir.size : ar.size,
-      .memoryTypeIndex = mem_type(ir.memoryTypeBits & ar.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)},
+      .allocationSize = ir.size, .memoryTypeIndex = mem_type(ir.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)},
       NULL, &im));
    CHECK(vkBindImageMemory(dev, img, im, 0));
-   CHECK(vkBindBufferMemory(dev, alias, im, 0));
+   vkGetImageMemoryRequirements(dev, rimg, &ir);
+   CHECK(vkAllocateMemory(dev, &(VkMemoryAllocateInfo){.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = ir.size, .memoryTypeIndex = mem_type(ir.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)},
+      NULL, &rm));
+   CHECK(vkBindImageMemory(dev, rimg, rm, 0));
 
    VkImageView v;
    CHECK(vkCreateImageView(dev, &(VkImageViewCreateInfo){.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image = img, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = ci.format,
       .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}}, NULL, &v));
 
-   /* host buffer: [upload words | copy readback | float readback (16 B/texel) | raw dump] */
+   /* host buffer: [upload words | copy readback | image copy readback | float readback (16 B/texel)] */
    const VkDeviceSize plane = (VkDeviceSize)W * H * 4, fplane = (VkDeviceSize)W * H * 16;
-   const VkDeviceSize hsz = 2 * plane + fplane + ir.size;
+   const VkDeviceSize hsz = 3 * plane + fplane;
    VkBuffer hb;
    CHECK(vkCreateBuffer(dev, &(VkBufferCreateInfo){.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = hsz,
       .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
@@ -338,14 +363,14 @@ run(int kind, int wpath)
    uint32_t *up = (uint32_t *)hp;
    for (uint32_t y = 0; y < H; ++y)
       for (uint32_t x = 0; x < W; ++x)
-         up[y * W + x] = pack_expected(x, y);
+         up[y * W + x] = pack_expected(x, y, true);
 
    VkDescriptorSet set;
    CHECK(vkAllocateDescriptorSets(dev, &(VkDescriptorSetAllocateInfo){
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = dpool,
       .descriptorSetCount = 1, .pSetLayouts = &dsl}, &set));
    VkDescriptorImageInfo ii = {.sampler = smp, .imageView = v, .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
-   VkDescriptorBufferInfo bi = {hb, 2 * plane, fplane};
+   VkDescriptorBufferInfo bi = {hb, 3 * plane, fplane};
    VkWriteDescriptorSet wr[3] = {
       {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0, .descriptorCount = 1,
        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &ii},
@@ -359,6 +384,7 @@ run(int kind, int wpath)
 
    VkCommandBuffer cb = begin();
    to_general(cb, img);
+   to_general(cb, rimg);
    if (wpath <= 1) {
       draw(cb, v, false, (VkRect2D){{0, 0}, {W, H}});
       if (wpath == 1) {
@@ -377,7 +403,12 @@ run(int kind, int wpath)
    barrier(cb);
    vkCmdCopyImageToBuffer(cb, img, VK_IMAGE_LAYOUT_GENERAL, hb, 1, &(VkBufferImageCopy){
       .bufferOffset = plane, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {W, H, 1}});
-   vkCmdCopyBuffer(cb, alias, hb, 1, &(VkBufferCopy){0, 2 * plane + fplane, ir.size});
+   vkCmdCopyImage(cb, img, VK_IMAGE_LAYOUT_GENERAL, rimg, VK_IMAGE_LAYOUT_GENERAL, 1, &(VkImageCopy){
+      .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+      .extent = {W, H, 1}});
+   barrier(cb);
+   vkCmdCopyImageToBuffer(cb, rimg, VK_IMAGE_LAYOUT_GENERAL, hb, 1, &(VkBufferImageCopy){
+      .bufferOffset = 2 * plane, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {W, H, 1}});
    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, storage ? p_read : p_read_tex);
    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0, 1, &set, 0, NULL);
    vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_ALL, 0, sizeof(PC), &PC);
@@ -386,18 +417,23 @@ run(int kind, int wpath)
 
    const char *kn = storage ? "storage" : "colour";
    unsigned fails = 0;
-   struct tally tc = {0}, tf = {0}, tl = {0};
-   const uint32_t *cw = (const uint32_t *)(hp + plane), *fw = (const uint32_t *)(hp + 2 * plane);
+   /* an upload stores the words exactly, so copies must return them exactly */
+   const bool exact = wpath == 3;
+   struct tally tc = {0}, ti = {0}, tf = {0}, tl = {0};
+   const uint32_t *cw = (const uint32_t *)(hp + plane), *iw = (const uint32_t *)(hp + 2 * plane);
+   const uint32_t *fw = (const uint32_t *)(hp + 3 * plane);
    for (uint32_t y = 0; y < H; ++y)
       for (uint32_t x = 0; x < W; ++x) {
-         check_word(&tc, x, y, cw[y * W + x]);
+         check_word(&tc, x, y, cw[y * W + x], exact);
+         check_word(&ti, x, y, iw[y * W + x], exact);
          check_float(&tf, x, y, &fw[(y * W + x) * 4]);
       }
    fails += print_tally(kn, wname[wpath], "copy", &tc);
+   fails += print_tally(kn, wname[wpath], "imgcopy", &ti);
    fails += print_tally(kn, wname[wpath], "fetch", &tf);
 
    if (storage) {
-      memset(hp + 2 * plane, 0, fplane);
+      memset(hp + 3 * plane, 0, fplane);
       cb = begin();
       struct pc pc1 = PC;
       pc1.mode = 1;
@@ -416,9 +452,10 @@ run(int kind, int wpath)
    vkDestroyBuffer(dev, hb, NULL);
    vkFreeMemory(dev, hm, NULL);
    vkDestroyImageView(dev, v, NULL);
-   vkDestroyBuffer(dev, alias, NULL);
    vkDestroyImage(dev, img, NULL);
+   vkDestroyImage(dev, rimg, NULL);
    vkFreeMemory(dev, im, NULL);
+   vkFreeMemory(dev, rm, NULL);
    CHECK(vkResetDescriptorPool(dev, dpool, 0));
    return fails;
 }
@@ -490,7 +527,7 @@ main(void)
          if (wpath == 2 && kind)
             continue;
          fails += run(kind, wpath);
-         cases += kind ? 2 : 3;
+         cases += kind ? 3 : 4;
       }
    printf("SUMMARY %u/%u cases pass\n", cases - fails, cases);
    return fails ? 1 : 0;
