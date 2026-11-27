@@ -674,6 +674,7 @@ hk_m5_storage_compression_eligible(const struct agx_device *dev, unsigned plane,
    case VK_FORMAT_R32G32_SINT:
    case VK_FORMAT_R32G32B32A32_UINT:
    case VK_FORMAT_R32G32B32A32_SINT: bit = 16384; break;
+   case VK_FORMAT_B10G11R11_UFLOAT_PACK32: bit = 2048; break;
    default: return false;
    }
    /* A mutable image's views may be FLOAT when the image is not: the list
