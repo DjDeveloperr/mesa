@@ -981,6 +981,37 @@ is_format_native(enum pipe_format format)
    }
 }
 
+/* nir_format_pack_rgba(), except that R11G11B10 keeps NaN. A compressed
+ * R11G11B10 image is copied through its own class (an R32_UINT view cannot
+ * decode it), so its texels pass through float, and the texture unit returns
+ * a NaN field as NaN. nir_format_pack_11f11f10f() clamps with fmax(), which
+ * turns NaN into zero, and a float compare-and-select clamp did not keep it
+ * either, so the fields are fixed up from the texels' own bits with integer
+ * compares: NaN stays NaN, a negative value becomes zero, and every other
+ * value converts through float16 exactly (an 11- or 10-bit float is a
+ * float16 with the sign and low mantissa bits dropped). */
+static nir_def *
+hk_pack_rgba(nir_builder *b, enum pipe_format format, nir_def *color)
+{
+   if (format != PIPE_FORMAT_R11G11B10_FLOAT)
+      return nir_format_pack_rgba(b, format, color);
+
+   nir_def *packed = nir_imm_int(b, 0);
+   for (unsigned c = 0; c < 3; ++c) {
+      const unsigned drop = c == 2 ? 5 : 4, mask = c == 2 ? 0x3ff : 0x7ff;
+      nir_def *bits = nir_channel(b, color, c);
+      nir_def *nan = nir_ult(b, nir_imm_int(b, 0x7f800000),
+                             nir_iand_imm(b, bits, 0x7fffffff));
+      nir_def *negative = nir_ilt(b, bits, nir_imm_int(b, 0));
+      nir_def *field = nir_iand_imm(
+         b, nir_ushr_imm(b, nir_u2u32(b, nir_f2f16(b, bits)), drop), mask);
+      field = nir_bcsel(b, negative, nir_imm_int(b, 0), field);
+      field = nir_bcsel(b, nan, nir_imm_int(b, 0x3f0 << (c == 2 ? 0 : 1)), field);
+      packed = nir_ior(b, packed, nir_ishl_imm(b, field, 11 * c));
+   }
+   return packed;
+}
+
 static nir_def *
 load_store_formatted(nir_builder *b, nir_def *base, nir_def *index,
                      nir_def *value, enum pipe_format format, bool native_formatted_memory)
@@ -991,7 +1022,9 @@ load_store_formatted(nir_builder *b, nir_def *base, nir_def *index,
    /* G17P now lowers this formatted intrinsic to a native packed
     * conversion plus one raw32-bit transfer. Keep the original compatible
     * compression-class view, without scalar normalize/shift/or expansion. */
-   if ((native_formatted_memory && is_format_native(format)) ||
+   /* R11G11B10 always takes the software conversion, which keeps NaN. */
+   if ((native_formatted_memory && is_format_native(format) &&
+        format != PIPE_FORMAT_R11G11B10_FLOAT) ||
        (!native_formatted_memory && format == PIPE_FORMAT_R10G10B10A2_UNORM)) {
       enum pipe_format isa = ail_pixel_format[format].renderable;
       unsigned isa_size = util_format_get_blocksize(isa);
@@ -1017,7 +1050,7 @@ load_store_formatted(nir_builder *b, nir_def *base, nir_def *index,
          nir_def *raw = !native_formatted_memory &&
                        format == PIPE_FORMAT_R8G8B8A8_UINT
             ? nir_format_pack_uint_unmasked(b, value, rgba8_bits, 4)
-            : nir_format_pack_rgba(b, format, value);
+            : hk_pack_rgba(b, format, value);
 
          if (blocksize_B <= 4) {
             assert(raw->num_components == 1);
@@ -1184,7 +1217,7 @@ build_image_copy_shader(const struct vk_meta_image_copy_key *key,
                /* Munge according to the implicit conversions so we get a bit copy */
                if (key->src_format != key->dst_format) {
                   nir_def *packed =
-                     nir_format_pack_rgba(b, key->src_format, value1);
+                     hk_pack_rgba(b, key->src_format, value1);
 
                   value1 = nir_format_unpack_rgba(b, packed, key->dst_format);
                }
