@@ -46,6 +46,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <xf86drm.h>
 #include "util/cache_ops.h"
@@ -2588,7 +2589,32 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
              * compute prefix is unchanged: both describe identical ordering,
              * while FRAGMENT_BARRIERS keeps the smaller render payload and
              * stays eligible for direct kernel publication. */
-            const bool m5_frag_barriers_only =
+            /* DEV PROBE (not for merge): HK_DEV_RPATH=frag|staged|whole picks
+             * the M5 render encoding for split renders, to bound what each
+             * costs. frag: FRAGMENT_BARRIERS whenever the vertex half names
+             * no render (compute prefixes then order both halves, an
+             * over-wait); staged: STAGE_PREFIXES; whole: no split. */
+            static int dev_rpath = -1;
+            if (unlikely(dev_rpath < 0)) {
+               const char *e = getenv("HK_DEV_RPATH");
+               dev_rpath = !e ? 0 : !strcmp(e, "frag") ? 1 :
+                           !strcmp(e, "staged") ? 2 : !strcmp(e, "whole") ? 3 : 0;
+               if (dev_rpath)
+                  fprintf(stderr, "HK_DEV_RPATH=%s (probe)\n", e);
+            }
+            if (dev_rpath == 3)
+               cs->sync.ta_split = false;
+            const bool m5_frag_forced =
+               dev_rpath == 1 && agx_chip_g17_m5(dev->dev.chip) &&
+               (dev->dev.params.features &
+                DRM_ASAHI_FEATURE_FRAGMENT_BARRIERS) &&
+               cs->sync.ta_split &&
+               cs->sync.barrier_ta[HK_SYNC_VDM] == DRM_ASAHI_BARRIER_NONE &&
+               cs->sync.prior_ta[HK_SYNC_VDM] == 0 &&
+               ta_command_prior[HK_SYNC_VDM] == 0 &&
+               (cs->sync.barrier[HK_SYNC_VDM] != DRM_ASAHI_BARRIER_NONE ||
+                cs->sync.prior[HK_SYNC_VDM] != 0);
+            const bool m5_frag_barriers_only = m5_frag_forced || (dev_rpath != 2 &&
                (dev->dev.params.features &
                 DRM_ASAHI_FEATURE_FRAGMENT_BARRIERS) &&
                cs->sync.ta_split &&
@@ -2599,7 +2625,7 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
                cs->sync.prior_ta[HK_SYNC_CDM] == cs->sync.prior[HK_SYNC_CDM] &&
                ta_command_prior[HK_SYNC_CDM] == command_prior[HK_SYNC_CDM] &&
                (cs->sync.barrier[HK_SYNC_VDM] != DRM_ASAHI_BARRIER_NONE ||
-                cs->sync.prior[HK_SYNC_VDM] != 0);
+                cs->sync.prior[HK_SYNC_VDM] != 0));
 
             /* M5: the vertex half's own render and compute prefixes, when
              * they are narrower than the whole render's, so its tiling can
@@ -2645,7 +2671,7 @@ queue_submit_recordings(struct hk_device *dev, struct hk_queue *queue,
              * the fragment half after them, so this render's vertex work can
              * overlap their fragment work. Compute dependencies keep ordering
              * the vertex half either way. */
-            if (!stage_prefixes && !m5_staged_v2 && !g17p_staged && !queue->sync.serialize &&
+            if (dev_rpath != 2 && !stage_prefixes && !m5_staged_v2 && !g17p_staged && !queue->sync.serialize &&
                 (dev->dev.params.features &
                  DRM_ASAHI_FEATURE_FRAGMENT_BARRIERS) &&
                 cs->sync.ta_split &&
