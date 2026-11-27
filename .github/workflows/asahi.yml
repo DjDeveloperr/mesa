@@ -45,7 +45,7 @@ jobs:
         run: |
           CC="ccache clang" CXX="ccache clang++" meson setup build \
             -Dgallium-drivers=asahi -Dvulkan-drivers=asahi \
-            -Dplatforms=wayland,x11 -Dbuild-tests=true -Dtools=drm-shim
+            -Dplatforms=wayland,x11 -Dbuild-tests=true -Dtools=drm-shim -Dbuildtype=release -Db_ndebug=false
 
       - name: Build
         run: meson compile -C build
